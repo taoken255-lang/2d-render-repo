@@ -149,3 +149,5 @@ rtc_mediaserver/service_old
 rtc_mediaserver/templates_old
 /*.wav
 images/
+
+weights/
