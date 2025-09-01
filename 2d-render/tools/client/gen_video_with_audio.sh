@@ -1,0 +1,1 @@
+ffmpeg -loglevel error -y -i tools/client/output.mp4 -i tools/client/res/w1.wav -map 0:v -map 1:a -c:v copy -c:a aac tools/client/video.mp4

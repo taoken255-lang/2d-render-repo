@@ -1,0 +1,104 @@
+from ditto.stream_pipeline_online import StreamSDK as onlineSDK
+from ditto.stream_pipeline_offline import StreamSDK as offlineSDK
+import numpy as np
+import io
+import librosa
+from loguru import logger
+import wave
+from config import Config
+import time
+
+
+class RenderService:
+	def __init__(self, is_online: bool = False):
+		self.is_online = is_online
+		cfg_pkl = "/app/weights/checkpoints/ditto_cfg/v0.4_hubert_cfg_trt_online.pkl"
+		data_root = Config.DITTO_DATA_ROOT
+		if is_online:
+			self.sdk = onlineSDK(cfg_pkl, data_root)
+			self.render_chunk = self.render_chunk_online
+		else:
+			self.sdk = onlineSDK(cfg_pkl, data_root)
+			self.render_chunk = self.render_chunk_online
+		self.bits_per_sample = 16
+		self.num_channels = 1
+		self.samples_per_sec = 16000
+		self.chunk_duration = 2.0
+
+		self.audio_buffer = np.zeros((3 * 640,), dtype=np.float32) if self.is_online else np.array([], dtype=np.float32)
+
+		self.is_setup_nd = True
+		self.timer_first_flag = True
+		self.start_time = 0
+
+	def set_avatar(self, avatar_id: str):
+		pass
+
+	def play_animation(self, animation: str):
+		pass
+
+	def set_emotion(self, emotion: str):
+		pass
+
+	def handle_image(self, image_chunk):
+		args = {"online_mode": self.is_online,
+		        "sampling_timesteps": int(Config.ONLINE_STREAMING_TIMESTAMPS) if self.is_online else int(Config.ONLINE_RENDER_TIMESTAMPS),
+		        "QUEUE_MAX_SIZE": int(Config.QUEUE_MAX_SIZE),
+		        "MS_MAX_SIZE": int(Config.MS_MAX_SIZE),
+		        "A2M_MAX_SIZE": int(Config.A2M_MAX_SIZE)}
+		self.sdk.setup(source_path=image_chunk, output_path="", **args)
+
+	def render_chunk_offline(self, audio_chunk, frame_rate: int, is_last: bool):
+		if not is_last:
+			logger.debug("START CHUNK RENDER")
+			wav_buffer = io.BytesIO()
+			with wave.open(wav_buffer, 'wb') as wav_file:
+				wav_file.setnchannels(1)
+				wav_file.setsampwidth(2)
+				wav_file.setframerate(frame_rate)
+				wav_file.writeframes(audio_chunk)
+			wav_buffer.seek(0)
+
+			audio, sr = librosa.load(wav_buffer, sr=16000)
+
+			self.audio_buffer = np.append(self.audio_buffer, audio)
+		else:
+			aud_feat = self.sdk.wav2feat.wav2feat(self.audio_buffer)
+			self.sdk.audio2motion_queue.put(aud_feat)
+
+	def render_chunk_online(self, audio_chunk, frame_rate: int, is_last: bool):
+		logger.debug("START CHUNK RENDER")
+		if not is_last:
+			logger.debug("IS NOT LAST")
+			wav_buffer = io.BytesIO()
+			with wave.open(wav_buffer, 'wb') as wav_file:
+				wav_file.setnchannels(1)
+				wav_file.setsampwidth(2)
+				wav_file.setframerate(frame_rate)
+				wav_file.writeframes(audio_chunk)
+			wav_buffer.seek(0)
+
+			audio, sr = librosa.load(wav_buffer, sr=16000)
+			self.audio_buffer = np.append(self.audio_buffer, audio)
+		chunksize = (3, 5, 2)
+		# audio = np.concatenate([np.zeros((chunksize[0] * 640,), dtype=np.float32), audio], 0)  # 1920 нулей, потом аудио?
+		split_len = int(sum(chunksize) * 0.04 * 16000)  # 6400 - длина split_len
+		buf_length = len(self.audio_buffer)
+		idx = 0
+		for i in range(0, buf_length, chunksize[1] * 640):  # от начала до конца с шагом 5 * 640 = 3200
+			audio_chunk = self.audio_buffer[i:i + split_len]  # передавать кусок предыдущего чанка в следующий?
+			if len(audio_chunk) < split_len:
+				if is_last:
+					logger.debug("IS LAST")
+					audio_chunk = np.pad(audio_chunk, (0, split_len - len(audio_chunk)), mode="constant")  # с конца нули до длины split_len
+					if self.timer_first_flag:
+						self.start_time = time.perf_counter()
+						self.timer_first_flag = False
+					self.sdk.run_chunk(audio_chunk, chunksize)
+			else:
+				if self.timer_first_flag:
+					self.start_time = time.perf_counter()
+					self.timer_first_flag = False
+				idx = i + chunksize[1] * 640
+				self.sdk.run_chunk(audio_chunk, chunksize)
+		self.audio_buffer = self.audio_buffer[idx::]
