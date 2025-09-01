@@ -28,3 +28,7 @@ env/
 *.swp
 *.swo
 *~ 
+.gitignore
+.dockerignore
+README.md
+.gitattributes
