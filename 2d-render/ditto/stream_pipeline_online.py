@@ -1,10 +1,12 @@
 import threading
 import queue
+
 import numpy as np
 import traceback
 from tqdm import tqdm
 from loguru import logger
 import time
+import json
 
 from ditto.core.atomic_components.avatar_registrar import AvatarRegistrar, smooth_x_s_info_lst
 from ditto.core.atomic_components.condition_handler import ConditionHandler, _mirror_index
@@ -38,6 +40,12 @@ wav2feat_cfg:
     w2f_cfg, 
     w2f_type
 """
+
+
+class EventObject:
+    def __init__(self, event_name, event_data):
+        self.event_name = event_name
+        self.event_data = event_data
 
 
 class StreamSDK:
@@ -86,9 +94,9 @@ class StreamSDK:
         overall_ctrl_info <class 'dict'> {'delta_pitch': 2}
         ==================================================
         """
-        
+
         self.default_kwargs = default_kwargs
-        
+
         self.avatar_registrar = AvatarRegistrar(**avatar_registrar_cfg)
         self.condition_handler = ConditionHandler(**condition_handler_cfg)
         self.audio2motion = Audio2Motion(lmdm_cfg)
@@ -98,6 +106,29 @@ class StreamSDK:
         self.putback = PutBack()
 
         self.wav2feat = Wav2Feat(**wav2feat_cfg)
+
+    def add_video_segment(self, video_segment_name: str):
+        """
+        Add video segment to buffer.
+        """
+        logger.info(f"add video segment {video_segment_name} into buffer({self.video_segment_buffer})")
+
+        self.video_segment_buffer.append(video_segment_name)
+
+    def add_emotion(self, emotion_name: str, gain: int = 10):
+        """
+        Add emotion into processing.
+        """
+
+        logger.info(f"add emotion {emotion_name} with gain {gain} into buffer({self.emotions_buffer})")
+
+        self.emotions_buffer.append((emotion_name, gain))
+        # if emotion_name in self.emotions_exp:
+        #     self.next_emotion = emotion_name
+        #     self.next_emotion_gain = gain
+        #     # logger.info(f"set next emotion to {emotion_name} with gain {gain}")
+        # else:
+        #     raise ValueError(f"invalid emotion: {emotion_name}. Available: {list(self.emotions_exp.keys())}")
 
     def _merge_kwargs(self, default_kwargs, run_kwargs):
         for k, v in default_kwargs.items():
@@ -144,7 +175,7 @@ class StreamSDK:
         self.crop_vx_ratio = kwargs.get("crop_vx_ratio", 0)
         self.crop_vy_ratio = kwargs.get("crop_vy_ratio", -0.125)
         self.crop_flag_do_rot = kwargs.get("crop_flag_do_rot", True)
-        
+
         # -- avatar_registrar: smooth for video --
         self.smo_k_s = kwargs.get('smo_k_s', 13)
 
@@ -201,10 +232,11 @@ class StreamSDK:
             "crop_flag_do_rot": self.crop_flag_do_rot,
         }
         n_frames = self.template_n_frames if self.template_n_frames > 0 else self.N_d  # ? -1 картинка, больше - видос
+        logger.info(f"source_path: {source_path}")
         source_info = self.avatar_registrar(
-            source_path, 
-            max_dim=self.max_size, 
-            n_frames=n_frames, 
+            source_path,
+            max_dim=self.max_size,
+            n_frames=n_frames,
             **crop_kwargs,
         )
 
@@ -220,7 +252,7 @@ class StreamSDK:
         # ======== Setup Audio2Motion (LMDM) ========
         x_s_info_0 = self.condition_handler.x_s_info_0
         self.audio2motion.setup(
-            x_s_info_0, 
+            x_s_info_0,
             overlap_v2=self.overlap_v2,
             fix_kp_cond=self.fix_kp_cond,
             fix_kp_cond_dim=self.fix_kp_cond_dim,
@@ -295,6 +327,79 @@ class StreamSDK:
 
         logger.info("------------------------------ ALL THREADS STARTED ------------------------------")
 
+        video_segments_path = kwargs.get("video_segments_path", None)
+        if video_segments_path:
+
+            self.setup_video_segments(video_segments_path)
+
+        emotions_info_path = kwargs.get("emotions_path", None)
+        if emotions_info_path:
+            self.setup_emotions(kwargs['emotions_path'])
+
+    def setup_emotions(self, emotions_path: str):
+        emotions_info_path = f"{emotions_path}/info.json"
+        logger.info(f"setup emotions from {emotions_info_path}")
+        with open(emotions_info_path, 'r') as fp:
+            self.emotions_info = json.load(fp)
+
+        self.emotions_exp = {}
+
+        for name in self.emotions_info:
+            exp_path = self.emotions_info[name]['path']
+            exp = np.load(f"{emotions_path}/{exp_path}")
+
+            # zero head movements
+            kp_head_mask = np.isin(np.arange(0, 21), [0, 3, 4, 5, 7, 8, 9, 10])
+
+            exp = exp.reshape(-1, 1, 21, 3)
+            exp[:, :, kp_head_mask] *= 0
+            exp = exp.reshape(-1, 1, 63)
+
+            emo_exps = exp[30:-30]
+            emo_exps_0 = exp[0]
+
+            emo_exps_0 = emo_exps_0.reshape(-1, 1, 21, 3)
+            emo_exps_0[:, :, kp_head_mask] *= 0
+            emo_exps_0 = emo_exps_0.reshape(-1, 1, 63)
+
+            # make emotion cyclically consistent
+            emo_exps -= emo_exps_0[0]
+
+            emo_exps = np.concatenate([emo_exps, emo_exps[::-1]])
+
+            self.emotions_exp[name] = emo_exps
+
+        self.emotions_exp['none'] = np.zeros([1, 1, 63])
+
+        self.emotions_buffer = []
+        self.emo_gain = 0
+        self.current_emotion_complete = False
+
+        # self.current_emotion = 'none'
+        self.emo_frame_idx = 0
+
+
+    def setup_video_segments(self, video_segments_path: str):
+        """
+        Read video segments from json file information.
+        """
+
+        self.video_segment_info = None
+
+        if video_segments_path:
+            with open(video_segments_path, 'r') as fp:
+                self.video_segment_info = json.load(fp)
+
+        self.video_segment_info = self.video_segment_info
+        self.video_segment_buffer = []
+        self.video_segment_current = "idle"
+        self.video_segment_previous = ""
+
+        # Handle global gen frame index
+        self.gen_frame_idx = self.video_segment_info["idle"]["start"]
+
+        print(f'loaded video segments {self.video_segment_info}')
+
     def stream_frames(self):
         while not self.stop_event.is_set():
             try:
@@ -358,6 +463,9 @@ class StreamSDK:
         while not self.stop_event.is_set():
             try:
                 item = self.putback_queue.get(timeout=1)
+                if isinstance(item, EventObject):
+                    self.writer_queue.put(item)
+                    continue
                 # if first_flag:
                 #     pb_start_time = time.perf_counter()
                 #     first_flag = False
@@ -387,6 +495,9 @@ class StreamSDK:
         while not self.stop_event.is_set():
             try:
                 item = self.decode_f3d_queue.get(timeout=1)
+                if isinstance(item, EventObject):
+                    self.putback_queue.put(item)
+                    continue
                 # if first_flag:
                 #     df3d_start_time = time.perf_counter()
                 #     first_flag = False
@@ -419,6 +530,9 @@ class StreamSDK:
         while not self.stop_event.is_set():
             try:
                 item = self.warp_f3d_queue.get(timeout=1)
+                if isinstance(item, EventObject):
+                    self.decode_f3d_queue.put(item)
+                    continue
                 # if first_flag:
                 #     wf3d_start_time = time.perf_counter()
                 #     first_flag = False
@@ -452,6 +566,9 @@ class StreamSDK:
         while not self.stop_event.is_set():
             try:
                 item = self.motion_stitch_queue.get(timeout=1)
+                if isinstance(item, EventObject):
+                    self.warp_f3d_queue.put(item)
+                    continue
                 # if first_flag:
                 #     ms_start_time = time.perf_counter()
                 #     first_flag = False
@@ -468,13 +585,44 @@ class StreamSDK:
             x_s_info = self.source_info["x_s_info_lst"][frame_idx]  # Данные по картинке - ? motion extractor по кадру (? кадр 1 для картинки)
             # start = time.perf_counter()
             # logger.info("-------- MOTION STITCH START --------")
-            x_s, x_d = self.motion_stitch(x_s_info, x_d_info, **ctrl_kwargs)
+            # logger.info(f"{self.current_emotion}, {self.next_emotion}")
+
+            # ------------------- Manage Emotions -------------------
+
+            if len(self.emotions_buffer) > 0 and self.emo_gain == 0:
+                self.current_emotion, self.current_emotion_gain = self.emotions_buffer.pop(0)
+            elif len(self.emotions_buffer) == 0 and self.emo_gain == 0:
+                self.current_emotion = None
+
+            if self.current_emotion is not None and not self.current_emotion_complete:
+                if self.current_emotion != "idle":
+                    x_exp_emo = self.emotions_exp[self.current_emotion][self.emo_frame_idx]
+                    self.emo_frame_idx = (self.emo_frame_idx + 1) % self.emotions_exp[self.current_emotion].shape[0]
+                    x_exp_emo *= min(self.current_emotion_gain / 10, self.emo_gain / 10)
+                    if self.emo_gain < 10:
+                        self.emo_gain += 1
+                    else:
+                        self.current_emotion_complete = True
+            elif self.current_emotion is not None and self.current_emotion_complete:
+                x_exp_emo = self.emotions_exp[self.current_emotion][self.emo_frame_idx]
+                self.emo_frame_idx = (self.emo_frame_idx + 1) % self.emotions_exp[self.current_emotion].shape[0]
+                x_exp_emo *= min(self.current_emotion_gain / 10, self.emo_gain / 10)
+                if len(self.emotions_buffer) > 0:
+                    self.emo_gain -= 1
+                    if self.emo_gain == 0:
+                        self.current_emotion_complete = False
+            elif self.current_emotion is None:
+                x_exp_emo = 0
+
+            # -------------------------------------------------------
+
+            x_s, x_d = self.motion_stitch(x_s_info, x_d_info, x_exp_emo=x_exp_emo, **ctrl_kwargs)
+
             # end = time.perf_counter()
             # logger.info(f"-------- MOTION STITCH END {end-start} --------")
             # logger.info("WARP F3D QUEUE PUT")
             self.warp_f3d_queue.put([frame_idx, x_s, x_d])
             # ms_res_time_list.append(time.perf_counter() - self.union_start)
-
 
     def audio2motion_worker(self):
         try:
@@ -482,7 +630,7 @@ class StreamSDK:
         except Exception as e:
             self.worker_exception = e
             self.stop_event.set()
-        
+
     def _audio2motion_worker(self):  # Чанки внутри - audio_features
         is_end = False
         seq_frames = self.audio2motion.seq_frames  # 80 поум
@@ -492,7 +640,7 @@ class StreamSDK:
 
         res_kp_seq = None
         res_kp_seq_valid_start = None if self.online_mode else 0  # None
-        
+
         global_idx = 0   # frame idx, for template
         local_idx = 0    # for cur audio_feat
         gen_frame_idx = 0
@@ -547,26 +695,80 @@ class StreamSDK:
                     x_d_info_list = self.audio2motion.cvt_fmt(valid_res_kp_seq)  # Список кадров-кейпоинтов формата [{np[]}, ...]
 
                     for x_d_info in x_d_info_list:
-                        frame_idx = _mirror_index(gen_frame_idx, self.source_info_frames)  # ? Индекс кадра
-                        ctrl_kwargs = self._get_ctrl_info(gen_frame_idx)  # ? Управляющие параметры
+
+                        # ------------------- Manage Video Segments -------------------
+                        video_segment = self.video_segment_info[self.video_segment_current]
+                        if self.gen_frame_idx >= video_segment["end"]:
+                            # if current video segment is ended, switch to idle
+                            if len(self.video_segment_buffer) > 0:
+                                self.video_segment_current = self.video_segment_buffer.pop(0)
+                                self.gen_frame_idx = self.video_segment_info[self.video_segment_current]["start"]
+                            else:
+                                self.video_segment_current = "idle"  # тест анимация за анимацией
+                                self.gen_frame_idx = self.video_segment_info["idle"]["start"]
+
+                            # if self.video_segment_current != "idle":  # очередь без айдла
+                            #     self.video_segment_current = "idle"  # тест анимация за анимацией
+                            #     self.gen_frame_idx = self.video_segment_info["idle"]["start"]
+                            # else:
+                            #     # if video segment buffer is not empty, switch to next video segment
+                            #     if len(self.video_segment_buffer) > 0:
+                            #         self.video_segment_current = self.video_segment_buffer.pop(0)
+                            #         self.gen_frame_idx = self.video_segment_info[self.video_segment_current]["start"]
+
+                        # if len(self.video_segment_buffer) > 0:
+                        #     self.video_segment_current = self.video_segment_buffer.pop(0)
+                        #     self.gen_frame_idx = self.video_segment_info[self.video_segment_current]["start"]
+                        # else:
+                        #     self.video_segment_current = "idle"  # тест анимация за анимацией
+                        #     self.gen_frame_idx = self.video_segment_info["idle"]["start"]
+
+
+                        frame_idx = _mirror_index(
+                            self.gen_frame_idx,
+                            self.video_segment_info[self.video_segment_current]["end"])
+                        frame_idx = max(0, min(frame_idx, self.source_info_frames - 1))
+
+                        if getattr(self, 'is_image_flag', False):
+                            frame_idx = 0
+                        # --------------------------------------------------------------
+                        # logger.info(f"frame_idx: {frame_idx} gen_frame_idx {self.gen_frame_idx} video_segment_current {self.video_segment_current} self.video_segment_buffer {self.video_segment_buffer}")
+                        # frame_idx = _mirror_index(gen_frame_idx, self.source_info_frames)  # ? Индекс кадра
+                        ctrl_kwargs = {} # self._get_ctrl_info(gen_frame_idx)  # ? Управляющие параметры
 
                         # a2m_res_time_list.append(time.perf_counter() - self.union_start)
 
                         while not self.stop_event.is_set():
                             try:
+                                if self.video_segment_current != self.video_segment_previous:
+                                    if self.video_segment_previous == "":
+                                        self.motion_stitch_queue.put(EventObject(event_name="animation", event_data={
+                                            "name": self.video_segment_current,
+                                            "event": 1
+                                        }))
+                                    else:
+                                        self.motion_stitch_queue.put(EventObject(event_name="animation", event_data={
+                                            "name": self.video_segment_previous,
+                                            "event": 0
+                                        }))
+                                        self.motion_stitch_queue.put(EventObject(event_name="animation", event_data={
+                                            "name": self.video_segment_current,
+                                            "event": 1
+                                        }))
+                                    self.video_segment_previous = self.video_segment_current
                                 self.motion_stitch_queue.put([frame_idx, x_d_info, ctrl_kwargs], timeout=1)  # Кладем в очередь обработчика
                                 break
                             except queue.Full:
                                 continue
 
-                        gen_frame_idx += 1
+                        self.gen_frame_idx += 1
 
                     res_kp_seq_valid_start += real_valid_len
-                
+
                     local_idx += real_valid_len
                     global_idx += real_valid_len
 
-                L = res_kp_seq.shape[1] 
+                L = res_kp_seq.shape[1]
                 if L > seq_frames * 2:  # ? Очистка массивов
                     cut_L = L - seq_frames * 2
                     res_kp_seq = res_kp_seq[:, cut_L:]
@@ -583,6 +785,10 @@ class StreamSDK:
 
             if is_end:
                 break
+        self.motion_stitch_queue.put(EventObject(event_name="animation", event_data={
+            "name": self.video_segment_current,
+            "event": 0
+        }))
         self.motion_stitch_queue.put(None)
         # logger.info(a2m_res_time_list)
 
@@ -602,7 +808,7 @@ class StreamSDK:
         # Check if any worker encountered an exception
         if self.worker_exception is not None:
             raise self.worker_exception
-        
+
     def run_chunk(self, audio_chunk, chunksize=(3, 5, 2)):
         # only for hubert
         aud_feat = self.wav2feat(audio_chunk, chunksize=chunksize)  # aud_feat - audio features через HuBERT

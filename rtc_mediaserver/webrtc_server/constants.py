@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import fractions
+import logging
 import os
 from pathlib import Path
 
@@ -18,6 +19,8 @@ __all__ = [
     "AUDIO_CHUNK_MS",
     "FRAMES_PER_CHUNK",
 ]
+
+from rtc_mediaserver.webrtc_server.shared import SYNC_QUEUE, SYNC_QUEUE_SEM
 
 
 class AudioParams:
@@ -74,8 +77,8 @@ CAN_SEND_FRAMES = asyncio.Event()
 AVATAR_SET = asyncio.Event()
 INIT_DONE = asyncio.Event()
 
-WS_CONTROL_CONNECTED = asyncio.Event()
-RTC_STREAM_CONNECTED = asyncio.Event()
+WS_CONTROL_CONNECTED = asyncio.BoundedSemaphore(1)
+RTC_STREAM_CONNECTED = asyncio.BoundedSemaphore(1)
 
 CLIENT_COMMANDS = asyncio.Queue()
 USER_EVENTS = asyncio.Queue()
@@ -83,3 +86,37 @@ USER_EVENTS = asyncio.Queue()
 INTERRUPT_CALLED = asyncio.Event()
 ANIMATION_CALLED = asyncio.Event()
 EMOTION_CALLED = asyncio.Event()
+
+COMMANDS_QUEUE = asyncio.Queue()
+
+class State:
+    def __init__(self):
+        self.streamer_task: asyncio.Task = None
+        self.avatar: str = None
+
+    def kill_streamer(self):
+        if self.streamer_task:
+            if not self.streamer_task.cancelled() and not self.streamer_task.done():
+                try:
+                    logging.info("streamer_task cancelling")
+                    self.streamer_task.cancel()
+                    logging.info("streamer_task cancelled")
+                    self.streamer_task = None
+                except:
+                    logging.error("Error cancel streamer_task")
+
+        while True:
+            try:
+                SYNC_QUEUE_SEM.release()
+            except ValueError as e:
+                break
+
+        while not SYNC_QUEUE.empty():
+            try:
+                SYNC_QUEUE.get_nowait()
+                SYNC_QUEUE.task_done()
+            except Exception:  # noqa: BLE001
+                break
+
+
+STATE = State()

@@ -1,0 +1,23 @@
+{
+    "video_path": "/app/assets/test.mp4",
+    "fps": 25,
+    "total_frames": 575,
+    "video_segments": {
+        "idle": {
+            "start": 0,
+            "end": 172
+        },
+        "hello_suit": {
+            "start": 172,
+            "end": 302
+        },
+        "point_suit": {
+            "start": 302,
+            "end": 436
+        },
+        "talk_suit": {
+            "start": 436,
+            "end": 575
+        }
+    }
+}

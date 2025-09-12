@@ -11,7 +11,7 @@ import numpy as np
 # (that produces rendered frames) and the media player that feeds them to AIORTC.
 AUDIO_SECOND_QUEUE: "asyncio.Queue[Tuple[np.ndarray, int]]" = Queue()
 SYNC_QUEUE: "Queue[Tuple[np.ndarray, List[np.ndarray]]]" = Queue()
-
+SYNC_QUEUE_SEM: "asyncio.Semaphore" = asyncio.BoundedSemaphore(2)
 # Number of active viewer websocket connections
 VIEWER_COUNT: int = 0
 

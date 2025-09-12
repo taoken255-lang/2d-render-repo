@@ -12,29 +12,18 @@ class Settings(BaseSettings):
     # Server settings
     host: str = "0.0.0.0"
     port: int = 8080
+    https: bool = False
+    ssl_cert: str = ""
+    ssl_key: str = ""
     
     # WebSocket settings
     websocket_host: str = "0.0.0.0"
     websocket_port: int = 8001
     
     # gRPC settings
-    grpc_server_url: str = "localhost:8500" #"2d.digitalavatars.ru"  # Default 2d-render port
+    grpc_server_url: str = "localhost:8502" #"2d.digitalavatars.ru"  # Default 2d-render port
     grpc_secure_channel: bool = False
-    
-    # WebRTC settings
-    # ICE servers help establish P2P connections through NAT/firewalls
-    # STUN servers help discover public IP addresses
-    # TURN servers relay data when direct connection is impossible
-    webrtc_ice_servers: list = [
-        {"urls": ["stun:stun.l.google.com:19302"]},
-        # Add TURN servers for production:
-        # {
-        #     "urls": ["turn:your-turn-server.com:3478"],
-        #     "username": "username",
-        #     "credential": "password"
-        # }
-    ]
-    
+
     # Audio settings
     audio_sample_rate: int = 16000
     audio_channels: int = 1

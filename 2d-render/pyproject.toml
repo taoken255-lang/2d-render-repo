@@ -27,6 +27,6 @@ dependencies = [
     "torchaudio>=2.7.1",
     "torchvision>=0.22.1",
     "tqdm>=4.67.1",
-    "transformers>=4.54.0",
+    "transformers==4.55.4",
     "uuid>=1.30",
 ]

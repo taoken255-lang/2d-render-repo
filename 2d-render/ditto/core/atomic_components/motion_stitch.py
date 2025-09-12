@@ -480,7 +480,10 @@ class MotionStitch:
             x_s = transform_keypoint(x_s_info)
             if self.is_image_flag:
                 self.x_s = x_s
-        
+
+        if 'x_exp_emo' in kwargs:
+            x_d_info['exp'] += kwargs['x_exp_emo']
+
         x_d = transform_keypoint(x_d_info)
         
         if self.flag_stitching:

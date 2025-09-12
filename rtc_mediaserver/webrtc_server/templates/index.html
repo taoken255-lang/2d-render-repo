@@ -92,6 +92,19 @@
         <option value="48000">48 kHz</option>
     </select>
 
+    <select id="animation">
+        <option value="idle" selected>idle</option>
+        <option value="hello_suit">hello_suit</option>
+        <option value="point_suit">point_suit</option>
+        <option value="talk_suit">talk_suit</option>
+    </select>
+
+    <select id="avatar">
+        <option value="red_hair" selected>red_hair</option>
+        <option value="blue_man">blue_man</option>
+        <option value="blue_woman">blue_woman</option>
+    </select>
+
     <div style="margin-top:15px">
         <button id="wsBtn" onclick="connectWS()">Connect WS</button>
         <button id="rtcBtn" onclick="connectWebRTC()" disabled>Connect WebRTC</button>
@@ -301,10 +314,16 @@ function sendAudio() {
       ws.send(JSON.stringify({
         type: 'audio',
         data: b64,
-        end: pos >= dataEnd
+        end: false
       }));
       addLog(`Sent ${slice.length} bytes`);
     }
+    ws.send(JSON.stringify({
+        type: 'audio',
+        data: '',
+        end: true
+      }));
+    addLog(`Sent 0 bytes`);
     status('Audio sent');
     addLog('Audio data sent');
   };
@@ -320,14 +339,16 @@ function sendInterrupt() {
 }
 
 function sendSetAvatar() {
-    ws.send(JSON.stringify({type: 'setAvatar', "avatarId": "default"}));
+    const sel = document.getElementById('avatar').value;
+    ws.send(JSON.stringify({type: 'setAvatar', "avatarId": sel}));
     status('setAvatar sent');
     addLog('setAvatar sent');
     // keep audio button enabled to continue? Up to spec keep enabled
 }
 
 function sendPlayAnimation() {
-    ws.send(JSON.stringify({type: 'playAnimation', animation: "default"}));
+    const sel = document.getElementById('animation').value;
+    ws.send(JSON.stringify({type: 'playAnimation', animation: sel}));
     status('playAnimation sent');
     addLog('playAnimation sent');
     // keep audio button enabled to continue? Up to spec keep enabled

@@ -37,7 +37,12 @@ class RenderServiceStub(object):
         self.RenderStream = channel.stream_stream(
                 '/Render.RenderService/RenderStream',
                 request_serializer=render__service__pb2.RenderRequest.SerializeToString,
-                response_deserializer=render__service__pb2.VideoChunk.FromString,
+                response_deserializer=render__service__pb2.RenderResponse.FromString,
+                _registered_method=True)
+        self.InfoRouter = channel.unary_unary(
+                '/Render.RenderService/InfoRouter',
+                request_serializer=render__service__pb2.InfoRequest.SerializeToString,
+                response_deserializer=render__service__pb2.InfoResponse.FromString,
                 _registered_method=True)
 
 
@@ -50,13 +55,24 @@ class RenderServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def InfoRouter(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_RenderServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
             'RenderStream': grpc.stream_stream_rpc_method_handler(
                     servicer.RenderStream,
                     request_deserializer=render__service__pb2.RenderRequest.FromString,
-                    response_serializer=render__service__pb2.VideoChunk.SerializeToString,
+                    response_serializer=render__service__pb2.RenderResponse.SerializeToString,
+            ),
+            'InfoRouter': grpc.unary_unary_rpc_method_handler(
+                    servicer.InfoRouter,
+                    request_deserializer=render__service__pb2.InfoRequest.FromString,
+                    response_serializer=render__service__pb2.InfoResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -85,7 +101,34 @@ class RenderService(object):
             target,
             '/Render.RenderService/RenderStream',
             render__service__pb2.RenderRequest.SerializeToString,
-            render__service__pb2.VideoChunk.FromString,
+            render__service__pb2.RenderResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def InfoRouter(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/Render.RenderService/InfoRouter',
+            render__service__pb2.InfoRequest.SerializeToString,
+            render__service__pb2.InfoResponse.FromString,
             options,
             channel_credentials,
             insecure,

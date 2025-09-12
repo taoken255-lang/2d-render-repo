@@ -14,8 +14,8 @@ from PIL import Image
 
 from rtc_mediaserver.logging_config import get_logger, setup_default_logging
 from .constants import DEFAULT_IMAGE_PATH, AUDIO_SETTINGS, CAN_SEND_FRAMES, \
-    FRAMES_PER_CHUNK, USER_EVENTS, INTERRUPT_CALLED, ANIMATION_CALLED, EMOTION_CALLED
-from .shared import AUDIO_SECOND_QUEUE, SYNC_QUEUE
+    FRAMES_PER_CHUNK, USER_EVENTS, INTERRUPT_CALLED, COMMANDS_QUEUE, STATE
+from .shared import AUDIO_SECOND_QUEUE, SYNC_QUEUE, SYNC_QUEUE_SEM
 from ..config import settings
 from ..events import ServiceEvents, Conditions
 
@@ -67,10 +67,15 @@ async def stream_worker_aio() -> None:
             raise RuntimeError(f"Avatar image '{DEFAULT_IMAGE_PATH}' not found")
         img_bytes = avatar_path.read_bytes()
         w, h = Image.open(avatar_path).size
+
         yield render_service_pb2.RenderRequest(
             image=render_service_pb2.ImageChunk(data=img_bytes, width=w, height=h),
-            online=True
+            online=True,
+            output_format = "RGB"
         )
+        avatar = STATE.avatar
+        logger.info(f"Set avatar {avatar}")
+        yield render_service_pb2.RenderRequest(set_avatar=render_service_pb2.SetAvatar(avatar_id=avatar))
         logger.debug("Initial avatar sent to render service (%dx%d)", w, h)
 
         # Stream audio seconds as they appear in queue with back-pressure from video
@@ -87,7 +92,7 @@ async def stream_worker_aio() -> None:
             #     seconds_inflight -= 1  # один долг погашен
 
             event = None
-
+            is_speech = True
             if AUDIO_SECOND_QUEUE.qsize() > 0:
                 logger.info(f"{AUDIO_SECOND_QUEUE.qsize()}")
                 audio_sec, sr = AUDIO_SECOND_QUEUE.get_nowait()
@@ -102,6 +107,7 @@ async def stream_worker_aio() -> None:
 
                 logger.info("Got buffered audio, pending %d", AUDIO_SECOND_QUEUE.qsize())
                 speech_sended = True
+                is_speech = True
             else:
                 if speech_sended:
                     speech_sended = False
@@ -109,18 +115,31 @@ async def stream_worker_aio() -> None:
                 # WAV не грузится → отправляем тишину
                 audio_sec, sr = np.zeros(CHUNK_SAMPLES, dtype=np.int16), AUDIO_SETTINGS.sample_rate
                 logger.info("Steady silence – idle state")
+                is_speech = False
 
             pending_audio.append((audio_sec, sr, event))
 
-            yield render_service_pb2.RenderRequest(
+            request = render_service_pb2.RenderRequest(
                 audio=render_service_pb2.AudioChunk(data=audio_sec.tobytes(), sample_rate=sr, bps=16),
                 online=True,
             )
+
+            yield request
+
+            while COMMANDS_QUEUE.qsize() > 0:
+                evt, evt_payload = COMMANDS_QUEUE.get_nowait()
+                if evt == ServiceEvents.SET_ANIMATION:
+                    logger.info(f"Request -> Playing animation {evt_payload}")
+                    yield render_service_pb2.RenderRequest(play_animation=render_service_pb2.PlayAnimation(animation=evt_payload))
+                elif evt == ServiceEvents.SET_EMOTION:
+                    pass
+
             await chunks_sem.acquire()
 
             #seconds_inflight += 1  # logically chunks in flight
             logger.info("Sent audio chunk to render service (inflight=%d, pending=%d)",
                         seconds_inflight, len(pending_audio))
+            await asyncio.sleep(0)
 
         logger.info("Sender exited")
 
@@ -133,42 +152,57 @@ async def stream_worker_aio() -> None:
             if not CAN_SEND_FRAMES.is_set():
                 logger.info("No clients - exiting receiver")
                 break
-            logger.info(f"New frame received, {len(frames_batch)}/{FRAMES_PER_CHUNK}")
-            frames += 1
-            # больше не используем событие каждые 2 кадра – управляем после минимального буфера кадров
-            img = Image.frombytes("RGBA", (chunk.width, chunk.height), chunk.data, "raw", "BGRA")
-            #img.save(f"images/frame_{frames}.png")
-            img_np = np.asarray(
-                img.convert("RGB"),
-                np.uint8,
-            )
-            frames_batch.append(img_np)
-            # Освобождаем один «токен» на каждый пришедший кадр – предотвращаем стоп при низком FPS
+            if chunk.WhichOneof("chunk") == "video":
+                logger.info(f"New frame received, {len(frames_batch)}/{FRAMES_PER_CHUNK}")
+                frames += 1
+                # больше не используем событие каждые 2 кадра – управляем после минимального буфера кадров
+                img = Image.frombytes("RGB", (chunk.video.width, chunk.video.height), chunk.video.data, "raw")
+                #img.save(f"images/frame_{frames}.png")
+                img_np = np.asarray(
+                    img,
+                    np.uint8,
+                )
+                frames_batch.append(img_np)
+                # Освобождаем один «токен» на каждый пришедший кадр – предотвращаем стоп при низком FPS
 
-            # Когда набрали минимальный пакет кадров
-            if len(frames_batch) == FRAMES_PER_CHUNK:
-                chunks_sem.release()
-                if pending_audio:
-                    audio_chunk, _sr, event = pending_audio.popleft()
-                    if event and event == ServiceEvents.EOS:
-                        USER_EVENTS.put_nowait({"type": "eos"})
-                        if ANIMATION_CALLED.is_set():
-                            USER_EVENTS.put_nowait({"type": "animationEnded"})
-                            ANIMATION_CALLED.clear()
-                        if EMOTION_CALLED.is_set():
-                            USER_EVENTS.put_nowait({"type": "emotionEnded"})
-                            EMOTION_CALLED.clear()
-                        await asyncio.sleep(0)
-                    elif event and event == ServiceEvents.INTERRUPT:
-                        USER_EVENTS.put_nowait({"type": "interrupted"})
-                        await asyncio.sleep(0)
-                        INTERRUPT_CALLED.clear()
-                    SYNC_QUEUE.put((audio_chunk, frames_batch.copy()))
-                    logger.info("SYNC_QUEUE +1 (size=%d)", SYNC_QUEUE.qsize())
-                else:
-                    logger.warning("Render service produced %d frames but no matching audio is pending", FRAMES_PER_CHUNK)
-                can_send_next.set()  # сообщаем генератору, что можно слать ещё секунду
-                frames_batch.clear()
+                # Когда набрали минимальный пакет кадров
+                if len(frames_batch) == FRAMES_PER_CHUNK:
+                    chunks_sem.release()
+                    if pending_audio:
+                        audio_chunk, _sr, event = pending_audio.popleft()
+                        if event and event == ServiceEvents.EOS:
+                            USER_EVENTS.put_nowait({"type": "eos"})
+                            # if ANIMATION_CALLED.is_set():
+                            #     USER_EVENTS.put_nowait({"type": "animationEnded"})
+                            #     ANIMATION_CALLED.clear()
+                            # if EMOTION_CALLED.is_set():
+                            #     USER_EVENTS.put_nowait({"type": "emotionEnded"})
+                            #     EMOTION_CALLED.clear()
+                            await asyncio.sleep(0)
+                        elif event and event == ServiceEvents.INTERRUPT:
+                            USER_EVENTS.put_nowait({"type": "interrupted"})
+                            await asyncio.sleep(0)
+                            INTERRUPT_CALLED.clear()
+                        await SYNC_QUEUE_SEM.acquire()
+                        SYNC_QUEUE.put((audio_chunk, frames_batch.copy()))
+                        logger.info("SYNC_QUEUE +1 (size=%d)", SYNC_QUEUE.qsize())
+                    else:
+                        logger.warning("Render service produced %d frames but no matching audio is pending", FRAMES_PER_CHUNK)
+                    can_send_next.set()  # сообщаем генератору, что можно слать ещё секунду
+                    frames_batch.clear()
+                    await asyncio.sleep(0)
+            elif chunk.WhichOneof("chunk") == "start_animation":
+                USER_EVENTS.put_nowait({"type": "animationStarted", "id": chunk.start_animation.animation_name})
+                logger.info(f"START ANIMATION {chunk.start_animation.animation_name}")
+                await asyncio.sleep(0)
+            elif chunk.WhichOneof("chunk") == "end_animation":
+                USER_EVENTS.put_nowait({"type": "animationEnded", "id": chunk.end_animation.animation_name})
+                logger.info(f"END ANIMATION {chunk.end_animation.animation_name}")
+                await asyncio.sleep(0)
+            elif chunk.WhichOneof("chunk") == "avatar_set":
+                USER_EVENTS.put_nowait({"type": "avatarSet", "id": chunk.avatar_set.avatar_id})
+                logger.info(f"AVATAR SET  {chunk.avatar_set.avatar_id}")
+                await asyncio.sleep(0)
 
         # ── flush remaining frames on stream end ────────────────────────
         logger.info("start flushing")
@@ -332,18 +366,12 @@ async def stream_worker_forever() -> None:
         restart_delay: Seconds to wait before restarting after a crash.
     """
     while True:
-        streamer = None
         try:
             await Conditions.can_process_frames()
-            streamer = asyncio.create_task(stream_worker_aio())
-            await streamer
+            STATE.streamer_task = asyncio.create_task(stream_worker_aio())
+            await STATE.streamer_task
             logger.warning("stream_worker_aio exited normally")
-        except Exception as e:
+        except BaseException as e:
             logger.exception(f"stream_worker_aio crashed {e!r}")
         finally:
-            if streamer:
-                logger.info("stream_worker_aio - task cancelled")
-                try:
-                    streamer.cancel()
-                except:
-                    pass
+            STATE.kill_streamer()

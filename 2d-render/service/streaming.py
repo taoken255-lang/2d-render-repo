@@ -1,5 +1,7 @@
-from proto import render_service_pb2, render_service_pb2_grpc
-from service.render import RenderService
+from proto import render_service_pb2_grpc
+from proto.render_service_pb2 import RenderResponse, VideoChunk, StartAnimation, EndAnimation, AvatarSet, InfoResponse, \
+	ItemList, RequestError, EmotionSet
+from service.render import RenderService, EventObject
 from loguru import logger
 import threading
 from threading import Event
@@ -10,6 +12,9 @@ from queue import Queue as tQueue
 from grpc import RpcError
 from uuid import uuid4
 from enum import Enum
+import imageio
+import json
+import os
 
 
 #
@@ -26,6 +31,12 @@ class CommandDataType(Enum):
 	SetAvatar = 1
 	PlayAnimation = 2
 	SetEmotion = 3
+
+
+class ErrorObject:
+	def __init__(self, error_type: str, error_message: str):
+		self.error_type = error_type
+		self.error_message = error_message
 
 
 class IPCObject:
@@ -73,6 +84,44 @@ class SharedString:
 #     def __init__(self, image: ImageObject = None, audio: AudioObject = None):
 #         self.image = image
 #         self.audio = audio
+
+
+def get_avatars(folder_path="/app/assets/"):
+	result = {}
+
+	# проходим по папкам в folder_path
+	for avatar_name in os.listdir(folder_path):
+		avatar_dir = os.path.join(folder_path, avatar_name)
+		if not os.path.isdir(avatar_dir):
+			continue  # пропускаем файлы, если вдруг они есть
+
+		animations = []
+		emotions = []
+
+		# путь к основному json (animations)
+		avatar_json_path = os.path.join(avatar_dir, f"{avatar_name}.json")
+		if os.path.exists(avatar_json_path):
+			with open(avatar_json_path, "r", encoding="utf-8") as f:
+				data = json.load(f)
+				animations = list(data.keys())
+
+		# путь к emotions/info.json
+		emotions_dir = os.path.join(avatar_dir, "emotions")
+		info_json_path = os.path.join(emotions_dir, "info.json")
+		if os.path.exists(info_json_path):
+			with open(info_json_path, "r", encoding="utf-8") as f:
+				emotions_data = json.load(f)
+				emotions = list(emotions_data.keys())
+
+		if emotions:
+			emotions.append("idle")
+		# формируем словарь
+		result[avatar_name] = {
+			"animations": animations,
+			"emotions": emotions
+		}
+
+	return result
 
 
 def render_stream(chunk, render, is_last=False):
@@ -125,27 +174,30 @@ def stream_frames_thread(render, video_queue, height, width, start_time, request
 			# 	dt_chunk_counter += 1
 			# 	logger.info(f"DITTO CHUNK TIME: {dt_chunk_time}")
 			# start_time.value = render.start_time
+			if isinstance(frame, EventObject):
+				video_queue.put(frame)
+				continue
 			video_queue.put(ImageObject(data=frame, height=height, width=width))
-			# dt_start_time = dt_cur_time
-			# dt_first_chunk_flag = True
-			# time_difference = dt_cur_time - dt_first_cur_time
-			# req_time_difference = 0.04 * dt_chunk_counter
-			# logger.info(f"TIME DIFFERENCES (req:act) {req_time_difference}:{time_difference}")
-			# time_chunks_list.append(time_difference)
-			# if time_difference <= req_time_difference:
-			# 	good_chunks += 1
-			# 	gb_info += "1"
-			# else:
-			# 	bad_chunks += 1
-			# 	gb_info += "0"
+		# dt_start_time = dt_cur_time
+		# dt_first_chunk_flag = True
+		# time_difference = dt_cur_time - dt_first_cur_time
+		# req_time_difference = 0.04 * dt_chunk_counter
+		# logger.info(f"TIME DIFFERENCES (req:act) {req_time_difference}:{time_difference}")
+		# time_chunks_list.append(time_difference)
+		# if time_difference <= req_time_difference:
+		# 	good_chunks += 1
+		# 	gb_info += "1"
+		# else:
+		# 	bad_chunks += 1
+		# 	gb_info += "0"
 		video_queue.put(ImageObject(data=None, height=height, width=width))
-		# logger.info(f"MIN DITTO OUTPUT CHUNK TIME: {dt_min_time}")
-		# logger.info(f"MAX DITTO OUTPUT CHUNK TIME: {dt_max_time}")
-		# logger.info(f"AVG DITTO OUTPUT CHUNK TIME: {dt_full_time / dt_chunk_counter}")
-		# logger.info(f"FULL DITTO OUTPUT TIME: {dt_full_time}")
-		# logger.info(f"CHUNKS REALTIME INFO (g:b): {good_chunks}:{bad_chunks}")
-		# logger.info(f"CHUNKS REALTIME INFO (g:b): {gb_info}")
-		# logger.info(time_chunks_list)
+	# logger.info(f"MIN DITTO OUTPUT CHUNK TIME: {dt_min_time}")
+	# logger.info(f"MAX DITTO OUTPUT CHUNK TIME: {dt_max_time}")
+	# logger.info(f"AVG DITTO OUTPUT CHUNK TIME: {dt_full_time / dt_chunk_counter}")
+	# logger.info(f"FULL DITTO OUTPUT TIME: {dt_full_time}")
+	# logger.info(f"CHUNKS REALTIME INFO (g:b): {good_chunks}:{bad_chunks}")
+	# logger.info(f"CHUNKS REALTIME INFO (g:b): {gb_info}")
+	# logger.info(time_chunks_list)
 
 
 def start_render_process(audio_queue, video_queue, start_time, request_id):
@@ -163,28 +215,61 @@ def start_render_process(audio_queue, video_queue, start_time, request_id):
 				render_stream(chunk=chunk, render=render, is_last=True)
 				break
 
-			if chunk.data_type == IPCDataType.IMAGE:
-				logger.info("RECEIVE IMAGE CHUNK")
-				img_chunk = chunk.data
-
-				img_height = img_chunk.height
-				img_width = img_chunk.width
-				img_data = img_chunk.data
-				render.handle_image(image_chunk=img_data)
-				logger.debug("START STREAMING THREAD")
-				stream_thread = threading.Thread(target=stream_frames_thread, args=(
-					render, video_queue, img_height, img_width, start_time, request_id,))
-				stream_thread.start()
+			# if chunk.data_type == IPCDataType.IMAGE:
+			# 	logger.info("RECEIVE IMAGE CHUNK")
+			# 	img_chunk = chunk.data
+			#
+			# 	img_height = img_chunk.height
+			# 	img_width = img_chunk.width
+			# 	img_data = img_chunk.data
+			#
+			# 	render.handle_video(
+			# 		video_path='/app/assets/test.mp4',
+			# 		video_info_path='/app/assets/test.json')
+			#
+			# 	logger.info("START STREAMING THREAD")
+			# 	stream_thread = threading.Thread(target=stream_frames_thread, args=(
+			# 		render, video_queue, img_height, img_width, start_time, request_id,))
+			# 	stream_thread.start()
 
 			elif chunk.data_type == IPCDataType.AUDIO:
 				logger.info("RECEIVE AUDIO CHUNK")
 				render_stream(chunk=chunk, render=render)
 
 			elif chunk.data_type == IPCDataType.COMMAND:
+				logger.info(f"RECEIVE COMMAND {chunk.data.command_type} {chunk.data.command_data}")
 				if chunk.data.command_type == CommandDataType.SetAvatar:
-					render.set_avatar(avatar_id=chunk.data.command_data)
+					# render.set_avatar(avatar_id=chunk.data.command_data)
+
+					avatar_name = chunk.data.command_data
+
+					if avatar_name not in get_avatars():
+						video_queue.put(
+							ErrorObject(error_type="avatar", error_message=f"Avatar {avatar_name} does not exist"))
+						continue
+
+					reader = imageio.get_reader(f'/app/assets/{avatar_name}/{avatar_name}.mp4')
+					size = reader.get_meta_data()["size"]
+					img_width = int(size[0])
+					img_height = int(size[1])
+
+					render.handle_video(
+						video_path=f'/app/assets/{avatar_name}/{avatar_name}.mp4',
+						video_info_path=f'/app/assets/{avatar_name}/{avatar_name}.json',
+						emotions_path=f'/app/assets/{avatar_name}/emotions/')
+
+					logger.info("START STREAMING THREAD")
+					video_queue.put(EventObject(event_name="avatar_set", event_data={"avatar_id": avatar_name}))
+					stream_thread = threading.Thread(target=stream_frames_thread, args=(
+						render, video_queue, img_height, img_width, start_time, request_id,))
+					stream_thread.start()
 
 				elif chunk.data.command_type == CommandDataType.PlayAnimation:
+					animation_name = chunk.data.command_data
+					if animation_name not in get_avatars()[avatar_name]:
+						video_queue.put(ErrorObject(error_type="animation",
+						                            error_message=f"Animation {animation_name} for avatar {avatar_name} does not exist"))
+						continue
 					render.play_animation(animation=chunk.data.command_data)
 
 				elif chunk.data.command_type == CommandDataType.SetEmotion:
@@ -211,10 +296,10 @@ def reader_thread(request_iterator, audio_queue, is_online, is_alpha, output_for
 						is_alpha.set()
 					output_format.set("BGRA" if chunk.output_format == "" else chunk.output_format)
 					audio_queue.put({"is_online": chunk.online})
-					audio_queue.put(IPCObject(data_type=IPCDataType.IMAGE,
-					                          data=ImageObject(data=chunk.image.data,
-					                                           height=chunk.image.height,
-					                                           width=chunk.image.width)))
+				# audio_queue.put(IPCObject(data_type=IPCDataType.IMAGE,
+				#                           data=ImageObject(data=chunk.image.data,
+				#                                            height=chunk.image.height,
+				#                                            width=chunk.image.width)))
 
 				elif chunk.audio.data:
 					bps_bytes = int(chunk.audio.bps / 8)
@@ -267,7 +352,13 @@ def get_mqueue_thread(from_queue, to_queue, is_alpha, output_format, alpha_servi
 	with logger.contextualize(request_id=request_id):
 		try:
 			while True:
-				frame = from_queue.get()
+				frame = from_queue.get(timeout=300)
+				if isinstance(frame, EventObject):
+					to_queue.put(frame)
+					continue
+				elif isinstance(frame, ErrorObject):
+					to_queue.put(frame)
+					continue
 				logger.debug("CHUNK DITTO -> LAST")
 				if frame.data is None:
 					logger.debug("CHUNK DITTO IS NONE - BREAK")
@@ -351,7 +442,8 @@ class StreamingService(render_service_pb2_grpc.RenderServiceServicer):
 			reader_trd.start()
 
 			mqueue_trd = threading.Thread(target=get_mqueue_thread,
-			                              args=(video_queue, local_queue, is_alpha, output_format, self.alpha_service, request_id,))
+			                              args=(video_queue, local_queue, is_alpha, output_format, self.alpha_service,
+			                                    request_id,))
 			mqueue_trd.start()
 
 			first_chunk_flag = False
@@ -360,11 +452,36 @@ class StreamingService(render_service_pb2_grpc.RenderServiceServicer):
 			# min_time = 1000
 			# max_time = 0
 			# chunk_counter = 0
+			avatar_sent_mem = None
 			try:
 				while True:
 					frame = local_queue.get()
 					logger.debug("CHUNK LAST -> OUTPUT")
-					if frame.data is None:
+					if isinstance(frame, EventObject):
+						if frame.event_name == "animation":
+							if frame.event_data["event"]:
+								yield RenderResponse(
+									start_animation=StartAnimation(animation_name=frame.event_data["name"]))
+							else:
+								yield RenderResponse(
+									end_animation=EndAnimation(animation_name=frame.event_data["name"]))
+							logger.info(f"SENT ANIMATION EVENT")
+						elif frame.event_name == "emotion":
+							yield RenderResponse(
+								emotion_set=EmotionSet(emotion_name=frame.event_data["name"]))
+							logger.info(f"SENT EMOTION EVENT")
+						elif frame.event_name == "avatar_set":
+							avatar_sent_mem = frame
+
+						continue
+					elif isinstance(frame, ErrorObject):
+						yield RenderResponse(
+							request_error=RequestError(error_type=frame.error_type, error_message=frame.error_message))
+						logger.error(
+							f"GOT ERROR OBJECT. ERROR TYPE: {frame.error_type} ERROR MESSAGE: {frame.error_message}")
+					# if frame.error_type == "avatar":
+					# 	break
+					elif frame.data is None:
 						logger.debug("CHUNK LAST IS NONE - BREAK")
 						break
 					# cur_time = time.perf_counter()
@@ -391,14 +508,16 @@ class StreamingService(render_service_pb2_grpc.RenderServiceServicer):
 					if not active_client:
 						raise RpcError
 					logger.debug(f"SEND")
-					try:
-						yield render_service_pb2.VideoChunk(data=frame.data, width=frame.width, height=frame.height)
-					except RpcError as e:
-						break
+					if avatar_sent_mem:
+						yield RenderResponse(
+							avatar_set=AvatarSet(avatar_id=avatar_sent_mem.event_data["avatar_id"]))
+						logger.info(f"SENT AVATAR SET EVENT")
+						avatar_sent_mem = None
+					yield RenderResponse(video=VideoChunk(data=frame.data, width=frame.width, height=frame.height))
 					logger.info(f"SENT")
-					# logger.info(f"END GRPC YIELDING {chunk_counter}")
-					# start_time = cur_time
-					# first_chunk_flag = True
+				# logger.info(f"END GRPC YIELDING {chunk_counter}")
+				# start_time = cur_time
+				# first_chunk_flag = True
 			except RpcError as e:
 				logger.error(f"GOT RPCERROR EXCEPTION IN RENDER STREAM {str(e)} START CLOSING PROCESS")
 			except Exception as e:
@@ -421,3 +540,15 @@ class StreamingService(render_service_pb2_grpc.RenderServiceServicer):
 			# logger.info(f"ALL PROCESSES CLOSED")
 			# logger.info(full_times_list)
 			logger.info(f"COMPLETE")
+
+	def InfoRouter(self, request, context):
+		folder_path = "/app/assets/"
+
+		avatars = get_avatars(folder_path=folder_path)
+		animations_result = {}
+		emotions_result = {}
+		for avatar in avatars:
+			animations_result[avatar] = ItemList(items=avatars[avatar]["animations"])
+			emotions_result[avatar] = ItemList(items=avatars[avatar]["emotions"])
+
+		return InfoResponse(animations=animations_result, emotions=emotions_result)

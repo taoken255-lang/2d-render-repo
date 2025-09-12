@@ -9,7 +9,7 @@ from typing import Any, Dict
 import numpy as np  # type: ignore
 
 from .constants import AUDIO_SETTINGS, CAN_SEND_FRAMES, USER_EVENTS, INTERRUPT_CALLED, CLIENT_COMMANDS, AVATAR_SET, \
-    ANIMATION_CALLED, EMOTION_CALLED, INIT_DONE
+    ANIMATION_CALLED, EMOTION_CALLED, INIT_DONE, COMMANDS_QUEUE, STATE
 from .shared import AUDIO_SECOND_QUEUE
 from .tools import fit_chunk
 from ..events import ServiceEvents
@@ -89,7 +89,9 @@ async def handle_audio(message: Dict[str, Any], state: ClientState) -> dict:
             "message": "Avatar is not set."
         }
     data_b64: str = message.get("data", "")
-    if not data_b64:
+    end_flag: bool = bool(message.get("end"))
+
+    if not data_b64 and not end_flag:
         return {
             "type": "error",
             "code": "AUDIO_DECODING_ERROR",
@@ -104,9 +106,9 @@ async def handle_audio(message: Dict[str, Any], state: ClientState) -> dict:
             "message": "Audio decoding error. Should be valid base-64 string."
         }
 
+
     state.pcm_buf.extend(chunk_bytes)
 
-    end_flag: bool = bool(message.get("end"))
     logger.info(f"is_last={end_flag}")
     # Flush full seconds first
     await _flush_pcm_buf(state)
@@ -120,21 +122,27 @@ async def handle_audio(message: Dict[str, Any], state: ClientState) -> dict:
         logger.info("Queued tail audio chunk (%d samples)", arr.shape[0])
 
 
-async def handle_set_avatar(message: Dict[str, Any], state: ClientState) -> dict:
+async def handle_set_avatar(message: Dict[str, Any], state: ClientState) -> dict | None:
+    avatar_id = message.get("avatarId", None)
+    if not avatar_id or avatar_id not in ("red_hair", "blue_man", "blue_woman"):
+        return {
+            "type": "error",
+            "code": "INVALID_AVATAR",
+            "message": "Invalid Avatar."
+        }
     if not INIT_DONE.is_set():
         return {
           "type": "error",
           "code": "NOT_CONNECTED",
           "message": "Connect method should be called first."
         }
+    if AVATAR_SET.is_set():
+        STATE.kill_streamer()
     state.avatar_id = message.get("avatarId")
     logger.info("Set avatar → %s", state.avatar_id)
     logger.info("AVATAR_SET.set()")
+    STATE.avatar = avatar_id
     AVATAR_SET.set()
-    return {
-      "type": "avatarSet",
-      "avatarId": state.avatar_id
-    }
 
 
 async def handle_play_animation(message: Dict[str, Any], state: ClientState) -> dict:
@@ -150,11 +158,32 @@ async def handle_play_animation(message: Dict[str, Any], state: ClientState) -> 
             "code": "AVATAR_IS_NOT_SET",
             "message": "Avatar is not set."
         }
-    animation_id = message.get("animation")
-    logger.info("Playing animation → %s", animation_id)
-    USER_EVENTS.put_nowait({"type": "animationStarted", "id": animation_id})
-    ANIMATION_CALLED.set()
+    animation = message.get("animation")
 
+    
+    avatar_animations = {
+        "red_hair": ("idle", "hello_suit", "point_suit", "talk_suit"),
+        "blue_man": ("idle", "hello", "turn"),
+        "blue_woman": ("idle", "hello", "turn", "turn2")
+    }
+
+    try:
+        if animation not in avatar_animations[STATE.avatar]:
+            return {
+                "type": "error",
+                "code": "INVALID_ANIMATION",
+                "message": "Invalid animation."
+            }
+    except Exception as e:
+        logger.error(f"Error checking animation: {e}")
+        return {
+                "type": "error",
+                "code": "INVALID_ANIMATION",
+                "message": "Invalid animation."
+            }
+
+    logger.info("Playing animation → %s", animation)
+    COMMANDS_QUEUE.put_nowait((ServiceEvents.SET_ANIMATION, animation))
 
 async def handle_set_emotion(message: Dict[str, Any], state: ClientState) -> dict:
     if not INIT_DONE.is_set():
@@ -171,9 +200,7 @@ async def handle_set_emotion(message: Dict[str, Any], state: ClientState) -> dic
         }
     emotion = message.get("emotion")
     logger.info("Set emotion → %s", emotion)
-    USER_EVENTS.put_nowait({"type": "emotionStarted", "id": "emotion"})
-    EMOTION_CALLED.set()
-
+    COMMANDS_QUEUE.put_nowait((ServiceEvents.SET_EMOTION, emotion))
 
 async def handle_set_panel_state(message: Dict[str, Any], state: ClientState) -> dict:
     if not INIT_DONE.is_set():

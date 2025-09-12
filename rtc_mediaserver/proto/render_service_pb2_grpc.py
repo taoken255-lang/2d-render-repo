@@ -37,7 +37,7 @@ class RenderServiceStub(object):
         self.RenderStream = channel.stream_stream(
                 '/Render.RenderService/RenderStream',
                 request_serializer=render__service__pb2.RenderRequest.SerializeToString,
-                response_deserializer=render__service__pb2.VideoChunk.FromString,
+                response_deserializer=render__service__pb2.RenderResponse.FromString,
                 _registered_method=True)
 
 
@@ -56,7 +56,7 @@ def add_RenderServiceServicer_to_server(servicer, server):
             'RenderStream': grpc.stream_stream_rpc_method_handler(
                     servicer.RenderStream,
                     request_deserializer=render__service__pb2.RenderRequest.FromString,
-                    response_serializer=render__service__pb2.VideoChunk.SerializeToString,
+                    response_serializer=render__service__pb2.RenderResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -85,7 +85,7 @@ class RenderService(object):
             target,
             '/Render.RenderService/RenderStream',
             render__service__pb2.RenderRequest.SerializeToString,
-            render__service__pb2.VideoChunk.FromString,
+            render__service__pb2.RenderResponse.FromString,
             options,
             channel_credentials,
             insecure,

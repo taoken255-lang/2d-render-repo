@@ -11,11 +11,13 @@ from typing import Any, Dict, Optional
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
-from aiortc import RTCPeerConnection, RTCSessionDescription, RTCDataChannel  # type: ignore
+from aiortc import RTCPeerConnection, RTCSessionDescription, RTCDataChannel, RTCConfiguration  # type: ignore
 from aiortc.rtcrtpsender import RTCRtpSender  # type: ignore
+from starlette.middleware.cors import CORSMiddleware
 
 from rtc_mediaserver.logging_config import get_logger, setup_default_logging
-from .constants import CAN_SEND_FRAMES, RTC_STREAM_CONNECTED, WS_CONTROL_CONNECTED, USER_EVENTS, AVATAR_SET, INIT_DONE
+from .constants import CAN_SEND_FRAMES, RTC_STREAM_CONNECTED, WS_CONTROL_CONNECTED, USER_EVENTS, AVATAR_SET, INIT_DONE, \
+    STATE
 from .grpc_client import stream_worker_forever
 from .player import WebRTCMediaPlayer
 from .handlers import HANDLERS, ClientState
@@ -27,7 +29,15 @@ logger = get_logger(__name__)
 
 app = FastAPI(title="Threaded WebRTC Server")
 
-pcs: Dict[int, RTCPeerConnection] = {}
+origins = ["*"]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Path to HTML client template
 TEMPLATES_DIR = Path(__file__).parent / "templates"
@@ -41,7 +51,7 @@ def rand_id() -> int:
 @app.on_event("startup")
 async def _startup_event() -> None:
     """Launch gRPC stream worker with auto-restart on app startup."""
-    asyncio.create_task(stream_worker_forever())
+    t = asyncio.create_task(stream_worker_forever())
     logger.info("gRPC aio worker task created (auto-restart enabled)")
 
 
@@ -55,11 +65,11 @@ async def index() -> HTMLResponse:  # type: ignore[override]
 
 async def process_offer(params: Dict[str, Any]) -> Dict[str, Any]:
     """Create peer connection and return answer dict for /offer route."""
+
     offer = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
 
     session = rand_id()
     pc = RTCPeerConnection()
-    pcs[session] = pc
 
     await pc.setRemoteDescription(offer)
 
@@ -79,28 +89,40 @@ async def process_offer(params: Dict[str, Any]) -> Dict[str, Any]:
     logger.info("session %s established", session)
 
     async def remove_client_by_timeout():
-        await asyncio.sleep(settings.uninitialized_rtc_kill_timeout)
-        logger.info(f"killer closing webrtc channel for client {session}")
+        logger.info(f">> killer wait for timeout to close webrtc channel for client {session}")
+        await asyncio.sleep(float(settings.uninitialized_rtc_kill_timeout))
+        logger.info(f"<< killer closing webrtc channel for client {session}")
         await pc.close()
-        pcs.pop(session, None)
 
     killer_task = asyncio.create_task(remove_client_by_timeout())
 
     @pc.on("connectionstatechange")
     async def on_connection_state_change():  # noqa: D401
         if pc.connectionState == "connected":
-            killer_task.cancel()
-            RTC_STREAM_CONNECTED.set()
-            logger.info("Peer connected")
-            logger.info("CAN_SEND_FRAMES.set()")
-            CAN_SEND_FRAMES.set()
+            if not killer_task.cancelled() or not killer_task.done():
+                killer_task.cancel()
+            try:
+                await asyncio.wait_for(RTC_STREAM_CONNECTED.acquire(), 0.1)
+                logger.info(f"Peer connected {session}")
+                logger.info("CAN_SEND_FRAMES.set()")
+                CAN_SEND_FRAMES.set()
+            except asyncio.TimeoutError:
+                logger.info(f"Peer tried to connect to locked resource {session}")
+                await pc.close()
+
         elif pc.connectionState in ("failed", "disconnected", "closed"):
-            logger.info("Peer disconnected (state=%s) – cleaning up", pc.connectionState)
+            if not killer_task.cancelled() or not killer_task.done():
+                killer_task.cancel()
+            logger.info(f"Peer disconnected {session} (state={pc.connectionState}) – cleaning up")
             logger.info("CAN_SEND_FRAMES.clear()")
             CAN_SEND_FRAMES.clear()
+            AVATAR_SET.clear()
             await pc.close()
-            pcs.pop(session, None)
-            RTC_STREAM_CONNECTED.clear()
+            try:
+                RTC_STREAM_CONNECTED.release()
+            except ValueError as e:
+                logger.error(f"RTC_STREAM_CONNECTED.release() -> {e!r}")
+            STATE.kill_streamer()
 
     return {
         "sdp": pc.localDescription.sdp,
@@ -110,7 +132,7 @@ async def process_offer(params: Dict[str, Any]) -> Dict[str, Any]:
 
 @app.post("/offer")
 async def offer(request: Request):  # type: ignore[override]
-    if RTC_STREAM_CONNECTED.is_set():
+    if RTC_STREAM_CONNECTED.locked():
         return JSONResponse(status_code=423, content=
             {
               "type": "error",
@@ -118,21 +140,9 @@ async def offer(request: Request):  # type: ignore[override]
               "message": "Reached max count of connected clients. Service busy."
             }
         )
-    # RTC_STREAM_CONNECTED.set()
     params = await request.json()
     answer_dict = await process_offer(params)
     return JSONResponse(answer_dict)
-
-
-@app.post("/destroy")
-async def destroy(request: Request):  # type: ignore[override]
-    data = await request.json()
-    sess = data.get("session")
-    pc: Optional[RTCPeerConnection] = pcs.pop(sess, None)
-    if pc:
-        await pc.close()
-    return JSONResponse({"status": "done"})
-
 
 # ───────────────────────── Control websocket ───────────────────────────
 
@@ -148,7 +158,7 @@ async def control_ws(websocket: WebSocket):  # type: ignore[override]
     """Single websocket channel handling control/audio messages."""
     await websocket.accept()
 
-    if WS_CONTROL_CONNECTED.is_set():
+    if WS_CONTROL_CONNECTED.locked():
         await websocket.send_json({
               "type": "error",
               "code": "SERVICE_BUSY",
@@ -157,7 +167,17 @@ async def control_ws(websocket: WebSocket):  # type: ignore[override]
         await websocket.close()
         return
 
-    WS_CONTROL_CONNECTED.set()
+    try:
+        await asyncio.wait_for(WS_CONTROL_CONNECTED.acquire(), 0.1)
+    except asyncio.TimeoutError:
+        await websocket.send_json({
+            "type": "error",
+            "code": "SERVICE_BUSY",
+            "message": "Reached max count of connected clients. Service busy."
+        })
+        await websocket.close()
+        return
+
     state = ClientState()
 
     eos_watcher = asyncio.create_task(send_user_event(websocket))
@@ -185,16 +205,16 @@ async def control_ws(websocket: WebSocket):  # type: ignore[override]
                   "message": "Unknown error occured."
                 })
     except WebSocketDisconnect:
-        WS_CONTROL_CONNECTED.clear()
         logger.info("Control websocket disconnected")
     finally:
         eos_watcher.cancel()
-        AVATAR_SET.clear()
+        try:
+            WS_CONTROL_CONNECTED.release()
+        except ValueError as e:
+            logger.error(f"WS_CONTROL_CONNECTED.release() -> {e!r}")
         INIT_DONE.clear()
 
 
 @app.on_event("shutdown")
 async def _shutdown() -> None:
-    for pc in list(pcs.values()):
-        await pc.close()
     logger.info("Application shutdown – all peer connections closed")

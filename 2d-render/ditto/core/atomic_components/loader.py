@@ -83,24 +83,24 @@ def load_video(video_path, n_frames=-1, max_dim=-1):
     return ret
 
 
-# def load_source_frames(source_path, max_dim=-1, n_frames=-1): # <-----------------------------------------------------
-#     if is_image(source_path):
-#         rgb = load_image(source_path, max_dim)
-#         rgb_list = [rgb]
-#         is_image_flag = True
-#     elif is_video(source_path):
-#         rgb_list = load_video(source_path, n_frames, max_dim)
-#         is_image_flag = False
-#     else:
-#         raise ValueError(f"Unsupported source type: {source_path}")
-#     return rgb_list, is_image_flag
-
-
-def load_source_frames(source_path, max_dim=-1, n_frames=-1):   # <-----------------------------------------------------
-    rgb = load_image(source_path, max_dim)
-    rgb_list = [rgb]
-    is_image_flag = True
+def load_source_frames(source_path, max_dim=-1, n_frames=-1): # <-----------------------------------------------------
+    if is_image(source_path):
+        rgb = load_image(source_path, max_dim)
+        rgb_list = [rgb]
+        is_image_flag = True
+    elif is_video(source_path):
+        rgb_list = load_video(source_path, n_frames, max_dim)
+        is_image_flag = False
+    else:
+        raise ValueError(f"Unsupported source type: {source_path}")
     return rgb_list, is_image_flag
+
+
+# def load_source_frames(source_path, max_dim=-1, n_frames=-1):   # <-----------------------------------------------------
+#     rgb = load_image(source_path, max_dim)
+#     rgb_list = [rgb]
+#     is_image_flag = True
+#     return rgb_list, is_image_flag
 
 
 def _mirror_index(index, size):
