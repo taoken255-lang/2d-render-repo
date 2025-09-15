@@ -54,7 +54,7 @@ def sending_audio(audio_file, image_file, event_queue):
 			image_bytes = file.read()
 			yield RenderRequest(image=ImageChunk(data=image_bytes, width=image_file_width, height=image_file_height),
 			                    online=True, alpha=False, output_format="RGB")
-			yield RenderRequest(set_avatar=SetAvatar(avatar_id="red_hair"))
+			yield RenderRequest(set_avatar=SetAvatar(avatar_id="blue_woman"))
 		logger.info("IMG SENT")
 
 		sample_rate = wf.getframerate()
@@ -70,28 +70,32 @@ def sending_audio(audio_file, image_file, event_queue):
 			# for _ in range(4):
 			# 	chunk += chunk
 			# for _ in range(30):
-			_ = event_queue.get()
+			# _ = event_queue.get()
 			yield RenderRequest(audio=AudioChunk(data=chunk, sample_rate=sample_rate, bps=bps))
 			logger.info("AUD SENT")
 
 			if cur_idx == anim_idx:  # or cur_idx == anim_idx + 1:
-				# yield RenderRequest(play_animation=PlayAnimation(animation="hello_suit"))
+				yield RenderRequest(play_animation=PlayAnimation(animation="idle"))
+				yield RenderRequest(play_animation=PlayAnimation(animation="idle"))
+				yield RenderRequest(play_animation=PlayAnimation(animation="idle"))
+				yield RenderRequest(play_animation=PlayAnimation(animation="idle"))
+				yield RenderRequest(play_animation=PlayAnimation(animation="idle"))
 				# yield RenderRequest(play_animation=PlayAnimation(animation="point_suit"))
-				yield RenderRequest(set_emotion=SetEmotion(emotion="angry"))
-				logger.info("EMOTION SENT")
+				# yield RenderRequest(set_emotion=SetEmotion(emotion="angry"))
+				# logger.info("EMOTION SENT")
 				# yield RenderRequest(play_animation=PlayAnimation(animation="point_suit"))
 			# 	# yield RenderRequest(play_animation=PlayAnimation(animation="talk_suit"))
 			# 	# yield RenderRequest(play_animation=PlayAnimation(animation="idle"))
 			# 	logger.info("sent play animation command")
-			elif cur_idx == anim_idx + 2:
-				yield RenderRequest(set_emotion=SetEmotion(emotion="happy"))
-				logger.info("EMOTION SENT")
-			elif cur_idx == anim_idx + 4:
-				yield RenderRequest(set_emotion=SetEmotion(emotion="sad"))
-				logger.info("EMOTION SENT")
-			elif cur_idx == anim_idx + 6:
-				yield RenderRequest(set_emotion=SetEmotion(emotion="angry"))
-				logger.info("EMOTION SENT")
+			# elif cur_idx == anim_idx + 2:
+			# 	yield RenderRequest(set_emotion=SetEmotion(emotion="happy"))
+			# 	logger.info("EMOTION SENT")
+			# elif cur_idx == anim_idx + 4:
+			# 	yield RenderRequest(set_emotion=SetEmotion(emotion="sad"))
+			# 	logger.info("EMOTION SENT")
+			# elif cur_idx == anim_idx + 6:
+			# 	yield RenderRequest(set_emotion=SetEmotion(emotion="angry"))
+			# 	logger.info("EMOTION SENT")
 
 			time.sleep(0.3)
 			cur_idx += 1
@@ -113,7 +117,7 @@ def run(audio_file, image_file, event_queue):
 			logger.info(f"SAVE IMAGE {img_idx}")
 			logger.info(img_idx)
 			# logger.info((response_chunk.height, response_chunk.width))
-			img = Image.frombytes("RGB", (response_chunk.video.height, response_chunk.video.width),
+			img = Image.frombytes("RGB", (response_chunk.video.width, response_chunk.video.height),
 			                      response_chunk.video.data, "raw")
 			img.save(f"tools/client/imgs/frame_{img_idx}.png")
 			img_idx += 1
@@ -123,10 +127,12 @@ def run(audio_file, image_file, event_queue):
 			logger.info(f"END ANIMATION {response_chunk.end_animation.animation_name}")
 		elif response_chunk.WhichOneof("chunk") == "emotion_set":
 			logger.info(f"EMOTION SET {response_chunk.emotion_set.emotion_name}")
+		# if img_idx % 10 == 0:
+		# 	event_queue.put(1)
 
 
 def local_run(audio_file, image_file, event_queue):
-	channel = grpc.insecure_channel("localhost:8503", options=[
+	channel = grpc.insecure_channel("localhost:8502", options=[
 		('grpc.max_receive_message_length', 10 * 1024 * 1024),
 		('grpc.max_send_message_length', 10 * 1024 * 1024),
 	])
@@ -165,8 +171,8 @@ def local_run(audio_file, image_file, event_queue):
 			logger.info(f"END ANIMATION {response_chunk.end_animation.animation_name}")
 		elif response_chunk.WhichOneof("chunk") == "emotion_set":
 			logger.info(f"EMOTION SET {response_chunk.emotion_set.emotion_name}")
-		if img_idx % 10 == 0:
-			event_queue.put(1)
+		# if img_idx % 10 == 0:
+			# event_queue.put(1)
 	logger.info(full_times)
 
 
@@ -188,8 +194,8 @@ if __name__ == '__main__':
 	event_queue = Queue()
 	event_queue.put(1)
 	event_queue.put(1)
-	audio_file = "tools/client/res/aioffice.wav"
+	audio_file = "tools/client/res/Ermakova.wav"
 	image_file = "tools/client/res/img3.png"
 	# info()
-	# run(audio_file, image_file)  # python -m tools.client.client
-	local_run(audio_file, image_file, event_queue)
+	run(audio_file, image_file, event_queue)  # python -m tools.client.client
+	# local_run(audio_file, image_file, event_queue)

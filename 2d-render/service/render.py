@@ -13,8 +13,9 @@ from ditto.stream_pipeline_offline import StreamSDK as offlineSDK
 
 
 class RenderService:
-	def __init__(self, is_online: bool = False):
+	def __init__(self, is_online: bool = False, sampling_timestamps: int = 0):
 		self.is_online = is_online
+		self.sampling_timestamps = sampling_timestamps
 		cfg_pkl = "/app/weights/checkpoints/ditto_cfg/v0.4_hubert_cfg_trt_online.pkl"
 		data_root = Config.DITTO_DATA_ROOT
 
@@ -50,18 +51,30 @@ class RenderService:
 		logger.info(f"emotion trigger: {emotion}")
 
 	def handle_image(self, image_chunk):
+
+		if self.sampling_timestamps != 0:
+			sts = self.sampling_timestamps
+		else:
+			sts = int(Config.ONLINE_STREAMING_TIMESTAMPS) if self.is_online else int(Config.ONLINE_RENDER_TIMESTAMPS)
+
 		args = {"online_mode": self.is_online,
-		        "sampling_timesteps": int(Config.ONLINE_STREAMING_TIMESTAMPS) if self.is_online else int(Config.ONLINE_RENDER_TIMESTAMPS),
+		        "sampling_timesteps": sts,
 		        "QUEUE_MAX_SIZE": int(Config.QUEUE_MAX_SIZE),
 		        "MS_MAX_SIZE": int(Config.MS_MAX_SIZE),
 		        "A2M_MAX_SIZE": int(Config.A2M_MAX_SIZE)}
 		self.sdk.setup(source_path=image_chunk, output_path="", **args)
 
-	def handle_video(self, video_path: str, video_info_path: str, emotions_path: str):
+	def handle_video(self, video_path: str, video_info_path: str, emotions_path: str = None):
+
+		if self.sampling_timestamps != 0:
+			sts = self.sampling_timestamps
+		else:
+			sts = int(Config.ONLINE_STREAMING_TIMESTAMPS) if self.is_online else int(Config.ONLINE_RENDER_TIMESTAMPS)
+
 		args = {"online_mode": self.is_online,
 				"video_segments_path": video_info_path,
 				"emotions_path": emotions_path,
-		        "sampling_timesteps": int(Config.ONLINE_STREAMING_TIMESTAMPS) if self.is_online else int(Config.ONLINE_RENDER_TIMESTAMPS),
+		        "sampling_timesteps": sts,
 		        "QUEUE_MAX_SIZE": int(Config.QUEUE_MAX_SIZE),
 		        "MS_MAX_SIZE": int(Config.MS_MAX_SIZE),
 		        "A2M_MAX_SIZE": int(Config.A2M_MAX_SIZE)}

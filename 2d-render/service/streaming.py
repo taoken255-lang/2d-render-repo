@@ -65,7 +65,7 @@ class CommandObject:
 		self.command_data = command_data
 
 
-class SharedString:
+class SharedValue:
 	def __init__(self, value):
 		self._value = value
 		self._lock = threading.Lock()
@@ -200,14 +200,14 @@ def stream_frames_thread(render, video_queue, height, width, start_time, request
 	# logger.info(time_chunks_list)
 
 
-def start_render_process(audio_queue, video_queue, start_time, request_id):
+def start_render_process(audio_queue, video_queue, start_time, sampling_timestamps, request_id):
 	with logger.contextualize(request_id=request_id):
 		# gc.disable()
 		is_online_chunk = True
 		while True:
 			chunk = audio_queue.get()
 			if is_online_chunk:
-				render = RenderService(is_online=chunk["is_online"])
+				render = RenderService(is_online=chunk["is_online"], sampling_timestamps=sampling_timestamps.value)
 				is_online_chunk = False
 				continue
 
@@ -253,10 +253,17 @@ def start_render_process(audio_queue, video_queue, start_time, request_id):
 					img_width = int(size[0])
 					img_height = int(size[1])
 
-					render.handle_video(
-						video_path=f'/app/assets/{avatar_name}/{avatar_name}.mp4',
-						video_info_path=f'/app/assets/{avatar_name}/{avatar_name}.json',
-						emotions_path=f'/app/assets/{avatar_name}/emotions/')
+					if os.path.exists(f'/app/assets/{avatar_name}/emotions/'):
+						render.handle_video(
+							video_path=f'/app/assets/{avatar_name}/{avatar_name}.mp4',
+							video_info_path=f'/app/assets/{avatar_name}/{avatar_name}.json',
+							emotions_path=f'/app/assets/{avatar_name}/emotions/'
+						)
+					else:
+						render.handle_video(
+							video_path=f'/app/assets/{avatar_name}/{avatar_name}.mp4',
+							video_info_path=f'/app/assets/{avatar_name}/{avatar_name}.json'
+						)
 
 					logger.info("START STREAMING THREAD")
 					video_queue.put(EventObject(event_name="avatar_set", event_data={"avatar_id": avatar_name}))
@@ -266,7 +273,8 @@ def start_render_process(audio_queue, video_queue, start_time, request_id):
 
 				elif chunk.data.command_type == CommandDataType.PlayAnimation:
 					animation_name = chunk.data.command_data
-					if animation_name not in get_avatars()[avatar_name]:
+					logger.info(get_avatars())
+					if animation_name not in get_avatars()[avatar_name]["animations"]:
 						video_queue.put(ErrorObject(error_type="animation",
 						                            error_message=f"Animation {animation_name} for avatar {avatar_name} does not exist"))
 						continue
@@ -282,7 +290,7 @@ def start_render_process(audio_queue, video_queue, start_time, request_id):
 		logger.info("FINISH CLOSING PROCESSES IN PROCESS")
 
 
-def reader_thread(request_iterator, audio_queue, is_online, is_alpha, output_format, request_id, context):
+def reader_thread(request_iterator, audio_queue, is_online, is_alpha, output_format, sampling_timestamps, request_id, context):
 	with logger.contextualize(request_id=request_id):
 		try:
 			for chunk in request_iterator:
@@ -294,6 +302,7 @@ def reader_thread(request_iterator, audio_queue, is_online, is_alpha, output_for
 						is_online.set()
 					if chunk.alpha:
 						is_alpha.set()
+					sampling_timestamps.value = chunk.sampling_timestamps
 					output_format.set("BGRA" if chunk.output_format == "" else chunk.output_format)
 					audio_queue.put({"is_online": chunk.online})
 				# audio_queue.put(IPCObject(data_type=IPCDataType.IMAGE,
@@ -430,15 +439,16 @@ class StreamingService(render_service_pb2_grpc.RenderServiceServicer):
 			local_queue = tQueue()
 			is_online = Event()
 			is_alpha = Event()
-			output_format = SharedString("")
+			output_format = SharedValue("")
+			sampling_timestamps = Value('d', 0)
 			full_start_time = Value('d', 0.0)
 			# full_times_list = []
 			render_process = Process(target=start_render_process,
-			                         args=(audio_queue, video_queue, full_start_time, request_id,))
+			                         args=(audio_queue, video_queue, full_start_time, sampling_timestamps, request_id))
 			render_process.start()
 
 			reader_trd = threading.Thread(target=reader_thread, args=(
-				request_iterator, audio_queue, is_online, is_alpha, output_format, request_id, context))
+				request_iterator, audio_queue, is_online, is_alpha, output_format, sampling_timestamps, request_id, context))
 			reader_trd.start()
 
 			mqueue_trd = threading.Thread(target=get_mqueue_thread,
@@ -479,6 +489,7 @@ class StreamingService(render_service_pb2_grpc.RenderServiceServicer):
 							request_error=RequestError(error_type=frame.error_type, error_message=frame.error_message))
 						logger.error(
 							f"GOT ERROR OBJECT. ERROR TYPE: {frame.error_type} ERROR MESSAGE: {frame.error_message}")
+						continue
 					# if frame.error_type == "avatar":
 					# 	break
 					elif frame.data is None:

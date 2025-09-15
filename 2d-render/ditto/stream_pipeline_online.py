@@ -374,6 +374,7 @@ class StreamSDK:
         self.emotions_buffer = []
         self.emo_gain = 0
         self.current_emotion_complete = False
+        self.emo_gain_max = 10
 
         # self.current_emotion = 'none'
         self.emo_frame_idx = 0
@@ -590,23 +591,25 @@ class StreamSDK:
             # ------------------- Manage Emotions -------------------
 
             if len(self.emotions_buffer) > 0 and self.emo_gain == 0:
+                self.warp_f3d_queue.put(EventObject(event_name="emotion", event_data={"name": self.video_segment_current}))
                 self.current_emotion, self.current_emotion_gain = self.emotions_buffer.pop(0)
             elif len(self.emotions_buffer) == 0 and self.emo_gain == 0:
+                # self.warp_f3d_queue.put(EventObject(event_name="emotion", event_data={"name": "idle"}))
                 self.current_emotion = None
 
             if self.current_emotion is not None and not self.current_emotion_complete:
                 if self.current_emotion != "idle":
                     x_exp_emo = self.emotions_exp[self.current_emotion][self.emo_frame_idx]
                     self.emo_frame_idx = (self.emo_frame_idx + 1) % self.emotions_exp[self.current_emotion].shape[0]
-                    x_exp_emo *= min(self.current_emotion_gain / 10, self.emo_gain / 10)
-                    if self.emo_gain < 10:
+                    x_exp_emo *= min(self.current_emotion_gain / self.emo_gain_max, self.emo_gain / self.emo_gain_max)
+                    if self.emo_gain < self.emo_gain_max:
                         self.emo_gain += 1
                     else:
                         self.current_emotion_complete = True
             elif self.current_emotion is not None and self.current_emotion_complete:
                 x_exp_emo = self.emotions_exp[self.current_emotion][self.emo_frame_idx]
                 self.emo_frame_idx = (self.emo_frame_idx + 1) % self.emotions_exp[self.current_emotion].shape[0]
-                x_exp_emo *= min(self.current_emotion_gain / 10, self.emo_gain / 10)
+                x_exp_emo *= min(self.current_emotion_gain / self.emo_gain_max, self.emo_gain / self.emo_gain_max)
                 if len(self.emotions_buffer) > 0:
                     self.emo_gain -= 1
                     if self.emo_gain == 0:
