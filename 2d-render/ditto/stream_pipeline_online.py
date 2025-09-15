@@ -333,7 +333,9 @@ class StreamSDK:
             self.setup_video_segments(video_segments_path)
 
         emotions_info_path = kwargs.get("emotions_path", None)
+        self.emotion_exists = False
         if emotions_info_path:
+            self.emotion_exists = True
             self.setup_emotions(kwargs['emotions_path'])
 
     def setup_emotions(self, emotions_path: str):
@@ -584,42 +586,44 @@ class StreamSDK:
 
             frame_idx, x_d_info, ctrl_kwargs = item  # Получаем данные из audio2motion (x_d_info - кадр-кейпоинт)
             x_s_info = self.source_info["x_s_info_lst"][frame_idx]  # Данные по картинке - ? motion extractor по кадру (? кадр 1 для картинки)
-            # start = time.perf_counter()
-            # logger.info("-------- MOTION STITCH START --------")
-            # logger.info(f"{self.current_emotion}, {self.next_emotion}")
+            if not self.emotion_exists:
+                x_s, x_d = self.motion_stitch(x_s_info, x_d_info, **ctrl_kwargs)
+            else:
+                # start = time.perf_counter()
+                # logger.info("-------- MOTION STITCH START --------")
+                # logger.info(f"{self.current_emotion}, {self.next_emotion}")
 
-            # ------------------- Manage Emotions -------------------
+                # ------------------- Manage Emotions -------------------
 
-            if len(self.emotions_buffer) > 0 and self.emo_gain == 0:
-                self.warp_f3d_queue.put(EventObject(event_name="emotion", event_data={"name": self.video_segment_current}))
-                self.current_emotion, self.current_emotion_gain = self.emotions_buffer.pop(0)
-            elif len(self.emotions_buffer) == 0 and self.emo_gain == 0:
-                # self.warp_f3d_queue.put(EventObject(event_name="emotion", event_data={"name": "idle"}))
-                self.current_emotion = None
+                if len(self.emotions_buffer) > 0 and self.emo_gain == 0:
+                    self.current_emotion, self.current_emotion_gain = self.emotions_buffer.pop(0)
+                    self.warp_f3d_queue.put(EventObject(event_name="emotion", event_data={"name": self.current_emotion}))
+                elif len(self.emotions_buffer) == 0 and self.emo_gain == 0:
+                    # self.warp_f3d_queue.put(EventObject(event_name="emotion", event_data={"name": "idle"}))
+                    self.current_emotion = None
 
-            if self.current_emotion is not None and not self.current_emotion_complete:
-                if self.current_emotion != "idle":
+                if self.current_emotion is not None and not self.current_emotion_complete:
+                    if self.current_emotion != "idle":
+                        x_exp_emo = self.emotions_exp[self.current_emotion][self.emo_frame_idx]
+                        self.emo_frame_idx = (self.emo_frame_idx + 1) % self.emotions_exp[self.current_emotion].shape[0]
+                        x_exp_emo *= min(self.current_emotion_gain / self.emo_gain_max, self.emo_gain / self.emo_gain_max)
+                        if self.emo_gain < self.emo_gain_max:
+                            self.emo_gain += 1
+                        else:
+                            self.current_emotion_complete = True
+                elif self.current_emotion is not None and self.current_emotion_complete:
                     x_exp_emo = self.emotions_exp[self.current_emotion][self.emo_frame_idx]
                     self.emo_frame_idx = (self.emo_frame_idx + 1) % self.emotions_exp[self.current_emotion].shape[0]
                     x_exp_emo *= min(self.current_emotion_gain / self.emo_gain_max, self.emo_gain / self.emo_gain_max)
-                    if self.emo_gain < self.emo_gain_max:
-                        self.emo_gain += 1
-                    else:
-                        self.current_emotion_complete = True
-            elif self.current_emotion is not None and self.current_emotion_complete:
-                x_exp_emo = self.emotions_exp[self.current_emotion][self.emo_frame_idx]
-                self.emo_frame_idx = (self.emo_frame_idx + 1) % self.emotions_exp[self.current_emotion].shape[0]
-                x_exp_emo *= min(self.current_emotion_gain / self.emo_gain_max, self.emo_gain / self.emo_gain_max)
-                if len(self.emotions_buffer) > 0:
-                    self.emo_gain -= 1
-                    if self.emo_gain == 0:
-                        self.current_emotion_complete = False
-            elif self.current_emotion is None:
-                x_exp_emo = 0
+                    if len(self.emotions_buffer) > 0:
+                        self.emo_gain -= 1
+                        if self.emo_gain == 0:
+                            self.current_emotion_complete = False
+                elif self.current_emotion is None:
+                    x_exp_emo = 0
 
-            # -------------------------------------------------------
-
-            x_s, x_d = self.motion_stitch(x_s_info, x_d_info, x_exp_emo=x_exp_emo, **ctrl_kwargs)
+                # -------------------------------------------------------
+                x_s, x_d = self.motion_stitch(x_s_info, x_d_info, x_exp_emo=x_exp_emo, **ctrl_kwargs)
 
             # end = time.perf_counter()
             # logger.info(f"-------- MOTION STITCH END {end-start} --------")
