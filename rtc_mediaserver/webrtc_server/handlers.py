@@ -10,6 +10,7 @@ import numpy as np  # type: ignore
 
 from .constants import AUDIO_SETTINGS, CAN_SEND_FRAMES, USER_EVENTS, INTERRUPT_CALLED, CLIENT_COMMANDS, AVATAR_SET, \
     ANIMATION_CALLED, EMOTION_CALLED, INIT_DONE, COMMANDS_QUEUE, STATE
+from .info import info
 from .shared import AUDIO_SECOND_QUEUE
 from .tools import fit_chunk
 from ..events import ServiceEvents
@@ -124,7 +125,11 @@ async def handle_audio(message: Dict[str, Any], state: ClientState) -> dict:
 
 async def handle_set_avatar(message: Dict[str, Any], state: ClientState) -> dict | None:
     avatar_id = message.get("avatarId", None)
-    if not avatar_id or avatar_id not in ("red_hair", "blue_man", "blue_woman"):
+
+    avatars_info = info()
+    available_avatars = list(avatars_info.keys())
+
+    if not avatar_id or avatar_id not in available_avatars:
         return {
             "type": "error",
             "code": "INVALID_AVATAR",
@@ -160,15 +165,10 @@ async def handle_play_animation(message: Dict[str, Any], state: ClientState) -> 
         }
     animation = message.get("animation")
 
-    
-    avatar_animations = {
-        "red_hair": ("idle", "hello_suit", "point_suit", "talk_suit"),
-        "blue_man": ("idle", "hello", "turn"),
-        "blue_woman": ("idle", "hello", "turn", "turn2")
-    }
+    avatars_info = info()
 
     try:
-        if animation not in avatar_animations[STATE.avatar]:
+        if animation not in avatars_info[STATE.avatar]["animations"]:
             return {
                 "type": "error",
                 "code": "INVALID_ANIMATION",
@@ -199,6 +199,24 @@ async def handle_set_emotion(message: Dict[str, Any], state: ClientState) -> dic
             "message": "Avatar is not set."
         }
     emotion = message.get("emotion")
+
+    avatars_info = info()
+
+    try:
+        if emotion not in avatars_info[STATE.avatar]["emotions"]:
+            return {
+              "type": "error",
+              "code": "INVALID_EMOTION",
+              "message": "Invalid emotion."
+            }
+    except Exception as e:
+        logger.error(f"Error checking emotion: {e}")
+        return {
+              "type": "error",
+              "code": "INVALID_EMOTION",
+              "message": "Invalid emotion."
+            }
+
     logger.info("Set emotion → %s", emotion)
     COMMANDS_QUEUE.put_nowait((ServiceEvents.SET_EMOTION, emotion))
 

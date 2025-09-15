@@ -21,6 +21,7 @@ from .constants import CAN_SEND_FRAMES, RTC_STREAM_CONNECTED, WS_CONTROL_CONNECT
 from .grpc_client import stream_worker_forever
 from .player import WebRTCMediaPlayer
 from .handlers import HANDLERS, ClientState
+from .info import info
 from ..config import settings
 
 # Ensure logging configured
@@ -58,6 +59,20 @@ async def _startup_event() -> None:
 @app.get("/", response_class=HTMLResponse)
 async def index() -> HTMLResponse:  # type: ignore[override]
     return HTMLResponse(HTML_FILE.read_text(encoding="utf-8"))
+
+
+@app.get("/info")
+async def get_info() -> JSONResponse:
+    """Get available avatars with their animations and emotions."""
+    try:
+        info_data = info()
+        return JSONResponse(info_data)
+    except Exception as e:
+        logger.error(f"Error getting info data: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": "Failed to get info data"}
+        )
 
 
 # ───────────────────────── WebRTC offer logic ──────────────────────────

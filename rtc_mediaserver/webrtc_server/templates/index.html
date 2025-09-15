@@ -74,36 +74,52 @@
         white-space: pre-wrap;
     }
 
-    input {
+    input, select {
         padding: 8px;
         margin: 5px;
         border: 1px solid #ddd;
         border-radius: 3px
+    }
+
+    label {
+        margin-right: 5px;
+        margin-left: 10px;
+        font-weight: bold
+    }
+
+    label:first-child {
+        margin-left: 0
     }</style>
 </head>
 <body>
 <div class="card"><h1>Threaded WebRTC Server</h1>
     <p>Single WS control channel + WebRTC media</p>
 
-    <input type="file" id="file" accept="audio/wav,.wav">
-    <select id="sample_rate">
-        <option value="16000" selected>16 kHz</option>
-        <option value="24000">24 kHz</option>
-        <option value="48000">48 kHz</option>
-    </select>
+    <div>
+        <label for="file">Audio file:</label>
+        <input type="file" id="file" accept="audio/wav,.wav">
+        <label for="sample_rate">Sample rate:</label>
+        <select id="sample_rate">
+            <option value="16000" selected>16 kHz</option>
+            <option value="24000">24 kHz</option>
+            <option value="48000">48 kHz</option>
+        </select>
+    </div>
 
-    <select id="animation">
-        <option value="idle" selected>idle</option>
-        <option value="hello_suit">hello_suit</option>
-        <option value="point_suit">point_suit</option>
-        <option value="talk_suit">talk_suit</option>
-    </select>
-
-    <select id="avatar">
-        <option value="red_hair" selected>red_hair</option>
-        <option value="blue_man">blue_man</option>
-        <option value="blue_woman">blue_woman</option>
-    </select>
+    <div style="margin-top: 10px;">
+        <label for="avatar">Avatar:</label>
+        <select id="avatar">
+            <option value="" disabled>Loading...</option>
+        </select>
+        <label for="animation">Animation:</label>
+        <select id="animation">
+            <option value="" disabled>Loading...</option>
+        </select>
+        <label for="emotion">Emotion:</label>
+        <select id="emotion">
+            <option value="" disabled>Loading...</option>
+        </select>
+    </div>
 
     <div style="margin-top:15px">
         <button id="wsBtn" onclick="connectWS()">Connect WS</button>
@@ -126,6 +142,7 @@
 <script>
 let ws = null;
 let pc = null;
+let infoData = null;
 
 const S = id => document.getElementById(id);
 
@@ -153,11 +170,115 @@ const status = (txt, err = false) => {
     addLog(txt);
 };
 
+// Load info data from server
+async function loadInfoData() {
+    try {
+        const response = await fetch('/info');
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+        infoData = await response.json();
+        addLog('Info data loaded successfully');
+        populateAvatarSelect();
+        // Set up change handler for avatar select
+        S('avatar').addEventListener('change', onAvatarChange);
+    } catch (error) {
+        addLog(`Failed to load info data: ${error.message}`);
+        console.error('Error loading info data:', error);
+        // Show error state in selects
+        S('avatar').innerHTML = '<option value="" disabled selected>Error loading data</option>';
+        S('animation').innerHTML = '<option value="" disabled selected>Error loading data</option>';
+        S('emotion').innerHTML = '<option value="" disabled selected>Error loading data</option>';
+    }
+}
+
+// Populate avatar select with loaded data
+function populateAvatarSelect() {
+    if (!infoData) return;
+    
+    const avatarSelect = S('avatar');
+    const currentValue = avatarSelect.value;
+    
+    // Clear existing options
+    avatarSelect.innerHTML = '';
+    
+    // Add options from loaded data
+    Object.keys(infoData).forEach(avatar => {
+        const option = document.createElement('option');
+        option.value = avatar;
+        option.textContent = avatar;
+        if (avatar === currentValue) {
+            option.selected = true;
+        }
+        avatarSelect.appendChild(option);
+    });
+    
+    // If no current value was selected, select the first one
+    if (avatarSelect.selectedIndex === -1 && avatarSelect.options.length > 0) {
+        avatarSelect.selectedIndex = 0;
+    }
+    
+    // Update animations and emotions for selected avatar
+    onAvatarChange();
+}
+
+// Update animations and emotions when avatar changes
+function onAvatarChange() {
+    if (!infoData) return;
+    
+    const selectedAvatar = S('avatar').value;
+    const avatarData = infoData[selectedAvatar];
+    
+    if (!avatarData) return;
+    
+    // Update animation select
+    const animationSelect = S('animation');
+    const currentAnimation = animationSelect.value;
+    animationSelect.innerHTML = '';
+    
+    avatarData.animations.forEach(animation => {
+        const option = document.createElement('option');
+        option.value = animation;
+        option.textContent = animation;
+        if (animation === currentAnimation) {
+            option.selected = true;
+        }
+        animationSelect.appendChild(option);
+    });
+    
+    if (animationSelect.selectedIndex === -1 && animationSelect.options.length > 0) {
+        animationSelect.selectedIndex = 0;
+    }
+    
+    // Update emotion select
+    const emotionSelect = S('emotion');
+    const currentEmotion = emotionSelect.value;
+    emotionSelect.innerHTML = '';
+    
+    avatarData.emotions.forEach(emotion => {
+        const option = document.createElement('option');
+        option.value = emotion;
+        option.textContent = emotion;
+        if (emotion === currentEmotion) {
+            option.selected = true;
+        }
+        emotionSelect.appendChild(option);
+    });
+    
+    if (emotionSelect.selectedIndex === -1 && emotionSelect.options.length > 0) {
+        emotionSelect.selectedIndex = 0;
+    }
+    
+    addLog(`Updated options for avatar: ${selectedAvatar}`);
+}
+
 // Initial state – only Connect WS enabled
 
 window.addEventListener('DOMContentLoaded', () => {
     // At start WS not connected, WebRTC may be established any time
     setBtns({ws: false, rtc: false, init: true, audio: true, interrupt: true, avatar: true, emotion: true, animation: true});
+    // Load info data and populate selects
+    loadInfoData();
 });
 
 function connectWS() {
@@ -356,7 +477,8 @@ function sendPlayAnimation() {
 
 
 function sendSetEmotion() {
-    ws.send(JSON.stringify({type: 'setEmotion', emotion: "default"}));
+    const sel = document.getElementById('emotion').value;
+    ws.send(JSON.stringify({type: 'setEmotion', emotion: sel}));
     status('setEmotion sent');
     addLog('setEmotion sent');
     // keep audio button enabled to continue? Up to spec keep enabled

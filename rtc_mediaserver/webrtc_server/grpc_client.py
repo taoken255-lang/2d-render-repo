@@ -132,7 +132,9 @@ async def stream_worker_aio() -> None:
                     logger.info(f"Request -> Playing animation {evt_payload}")
                     yield render_service_pb2.RenderRequest(play_animation=render_service_pb2.PlayAnimation(animation=evt_payload))
                 elif evt == ServiceEvents.SET_EMOTION:
-                    pass
+                    logger.info(f"Request -> set emotion {evt_payload}")
+                    yield render_service_pb2.RenderRequest(
+                        set_emotion=render_service_pb2.SetEmotion(emotion=evt_payload))
 
             await chunks_sem.acquire()
 
@@ -146,7 +148,7 @@ async def stream_worker_aio() -> None:
     frames = 0
 
     logger.info("Start reading chunks")
-
+    prev_emotion = None
     try:
         async for chunk in stub.RenderStream(sender_generator()):
             if not CAN_SEND_FRAMES.is_set():
@@ -202,6 +204,13 @@ async def stream_worker_aio() -> None:
             elif chunk.WhichOneof("chunk") == "avatar_set":
                 USER_EVENTS.put_nowait({"type": "avatarSet", "id": chunk.avatar_set.avatar_id})
                 logger.info(f"AVATAR SET  {chunk.avatar_set.avatar_id}")
+                await asyncio.sleep(0)
+            elif chunk.WhichOneof("chunk") == "emotion_set":
+                if prev_emotion and prev_emotion != chunk.emotion_set.emotion_name:
+                    USER_EVENTS.put_nowait({"type": "emotionEnded", "id": prev_emotion})
+                prev_emotion = chunk.emotion_set.emotion_name
+                USER_EVENTS.put_nowait({"type": "emotionStarted", "id": chunk.emotion_set.emotion_name})
+                logger.info(f"EMOTION SET {chunk.emotion_set.emotion_name}")
                 await asyncio.sleep(0)
 
         # ── flush remaining frames on stream end ────────────────────────
