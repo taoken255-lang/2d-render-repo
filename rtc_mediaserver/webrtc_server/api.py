@@ -7,13 +7,14 @@ import logging
 import random
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Union
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
 from aiortc import RTCPeerConnection, RTCSessionDescription, RTCDataChannel, RTCConfiguration  # type: ignore
 from aiortc.rtcrtpsender import RTCRtpSender  # type: ignore
 from starlette.middleware.cors import CORSMiddleware
+from starlette.responses import Response
 
 from rtc_mediaserver.logging_config import get_logger, setup_default_logging
 from .constants import CAN_SEND_FRAMES, RTC_STREAM_CONNECTED, WS_CONTROL_CONNECTED, USER_EVENTS, AVATAR_SET, INIT_DONE, \
@@ -59,7 +60,7 @@ async def _startup_event() -> None:
 @app.get("/", response_class=HTMLResponse)
 async def index() -> HTMLResponse:  # type: ignore[override]
     if not settings.debug_page_enabled:
-        return
+        return Response(status_code=404)
     return HTMLResponse(HTML_FILE.read_text(encoding="utf-8"))
 
 
