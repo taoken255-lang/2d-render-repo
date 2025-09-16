@@ -149,3 +149,10 @@ rtc_mediaserver/service_old
 rtc_mediaserver/templates_old
 /*.wav
 images/
+
+!2d-render/tools/client/client.py
+!2d-render/tools/client/render_service_pb2.py
+!2d-render/tools/client/render_service_pb2_grpc.py
+2d-render/tools/client
+weights/
+uv.toml

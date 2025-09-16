@@ -1,1 +1,0 @@
-ffmpeg -framerate 25 -start_number 0 -i tools/client/imgs/frame_%d.png -c:v libx264 -pix_fmt yuv420p tools/client/output.mp4

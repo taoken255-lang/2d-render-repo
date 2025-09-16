@@ -17,7 +17,7 @@ from starlette.middleware.cors import CORSMiddleware
 
 from rtc_mediaserver.logging_config import get_logger, setup_default_logging
 from .constants import CAN_SEND_FRAMES, RTC_STREAM_CONNECTED, WS_CONTROL_CONNECTED, USER_EVENTS, AVATAR_SET, INIT_DONE, \
-    STATE
+    STATE, State
 from .grpc_client import stream_worker_forever
 from .player import WebRTCMediaPlayer
 from .handlers import HANDLERS, ClientState
@@ -58,6 +58,8 @@ async def _startup_event() -> None:
 
 @app.get("/", response_class=HTMLResponse)
 async def index() -> HTMLResponse:  # type: ignore[override]
+    if not settings.debug_page_enabled:
+        return
     return HTMLResponse(HTML_FILE.read_text(encoding="utf-8"))
 
 
@@ -121,6 +123,7 @@ async def process_offer(params: Dict[str, Any]) -> Dict[str, Any]:
                 logger.info(f"Peer connected {session}")
                 logger.info("CAN_SEND_FRAMES.set()")
                 CAN_SEND_FRAMES.set()
+                State.current_session_id = session
             except asyncio.TimeoutError:
                 logger.info(f"Peer tried to connect to locked resource {session}")
                 await pc.close()
@@ -129,15 +132,16 @@ async def process_offer(params: Dict[str, Any]) -> Dict[str, Any]:
             if not killer_task.cancelled() or not killer_task.done():
                 killer_task.cancel()
             logger.info(f"Peer disconnected {session} (state={pc.connectionState}) – cleaning up")
-            logger.info("CAN_SEND_FRAMES.clear()")
-            CAN_SEND_FRAMES.clear()
-            AVATAR_SET.clear()
+            if session == State.current_session_id:
+                logger.info("CAN_SEND_FRAMES.clear()")
+                CAN_SEND_FRAMES.clear()
+                AVATAR_SET.clear()
+                try:
+                    RTC_STREAM_CONNECTED.release()
+                except ValueError as e:
+                    logger.error(f"RTC_STREAM_CONNECTED.release() -> {e!r}")
+                STATE.kill_streamer()
             await pc.close()
-            try:
-                RTC_STREAM_CONNECTED.release()
-            except ValueError as e:
-                logger.error(f"RTC_STREAM_CONNECTED.release() -> {e!r}")
-            STATE.kill_streamer()
 
     return {
         "sdp": pc.localDescription.sdp,
