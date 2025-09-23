@@ -26,6 +26,7 @@ __all__ = [
     "WebRTCMediaPlayer",
 ]
 
+TIME_SPAN = 0.02
 
 class PlayerStreamTrack(MediaStreamTrack):
     """Custom aiortc track that pulls frames from an internal queue."""
@@ -36,9 +37,11 @@ class PlayerStreamTrack(MediaStreamTrack):
         super().__init__()
         self.kind = kind
         self._player = player
+        self._count = 0
+        self._last_sent_time = 0
         # FIX ограничил размер очереди, чтобы не накапливать лаг и не блокироваться
         # (видео можно дропать, аудио — иногда тоже лучше дропнуть, чем уехать во времени)
-        self._queue: asyncio.Queue[Tuple[Union[Frame, Packet], float]] = asyncio.Queue(maxsize=5)  # FIX bounded queue
+        self._queue: asyncio.Queue[Tuple[Union[Frame, Packet], float]] = asyncio.Queue(maxsize=5) if kind == "video" else asyncio.Queue()  # FIX bounded queue
         self._tb = VIDEO_TB if kind == "video" else AUDIO_SETTINGS.audio_tb
         self._period = VIDEO_PTIME if kind == "video" else AUDIO_SETTINGS.audio_ptime
         self._rate = VIDEO_CLOCK if kind == "video" else AUDIO_SETTINGS.sample_rate
@@ -68,11 +71,22 @@ class PlayerStreamTrack(MediaStreamTrack):
 
     async def recv(self):  # type: ignore[override]
         self._player._ensure_worker(self)
-        frame, _ = await self._queue.get()
+
+        # Wait for proper timing before getting next frame
         await self._sleep_until_slot()
-        frame.pts = self._pts
-        frame.time_base = self._tb
+
+        frame, _ = await self._queue.get()
+
+        # Set consistent PTS and time_base for both audio and video
+        if self.kind == "audio":
+            frame.pts = self._pts
+            frame.time_base = self._tb
+        else:
+            frame.pts = self._pts
+            frame.time_base = self._tb
+
         return frame
+
 
     def stop(self) -> None:  # type: ignore[override]
         super().stop()

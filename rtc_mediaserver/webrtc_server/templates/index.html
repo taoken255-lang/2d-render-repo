@@ -119,6 +119,8 @@
         <select id="emotion">
             <option value="" disabled>Loading...</option>
         </select>
+        <label for="auto_idle">Auto Idle:</label>
+        <input id="auto_idle" type="checkbox" checked />
     </div>
 
     <div style="margin-top:15px">
@@ -469,7 +471,8 @@ function sendSetAvatar() {
 
 function sendPlayAnimation() {
     const sel = document.getElementById('animation').value;
-    ws.send(JSON.stringify({type: 'playAnimation', animation: sel}));
+    const auto_idle_cb = document.getElementById('auto_idle');
+    ws.send(JSON.stringify({type: 'playAnimation', animation: sel, auto_idle: auto_idle_cb.checked}));
     status('playAnimation sent');
     addLog('playAnimation sent');
     // keep audio button enabled to continue? Up to spec keep enabled

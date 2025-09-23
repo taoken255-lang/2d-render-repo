@@ -94,6 +94,7 @@ class State:
         self.streamer_task: asyncio.Task = None
         self.avatar: str = None
         self.current_session_id = None
+        self.auto_idle: bool = True
 
     def kill_streamer(self):
         if self.streamer_task:

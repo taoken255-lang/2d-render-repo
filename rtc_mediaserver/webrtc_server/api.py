@@ -77,9 +77,143 @@ async def get_info() -> JSONResponse:
             content={"error": "Failed to get info data"}
         )
 
-
 # ───────────────────────── WebRTC offer logic ──────────────────────────
+def sdp_set_bandwidth(sdp: str, *, video_kbps: int = 4000, audio_kbps: int = 128, framerate: int = 25) -> str:
+    """Простой SDP-мунджер: задаёт b=AS для audio/video и a=framerate для видео."""
+    lines = sdp.splitlines()
+    out = []
+    in_video = False
+    in_audio = False
 
+    def inject_video_params(dst: list):
+        # Сносим уже существующие ограничения, чтобы не дублировать
+        while dst and (dst[-1].startswith("b=AS:") or dst[-1].startswith("b=TIAS:") or dst[-1].startswith("a=framerate:")):
+            dst.pop()
+        dst.append(f"b=AS:{video_kbps}")
+        dst.append(f"a=framerate:{framerate}")
+
+    def inject_audio_params(dst: list):
+        while dst and (dst[-1].startswith("b=AS:") or dst[-1].startswith("b=TIAS:")):
+            dst.pop()
+        dst.append(f"b=AS:{audio_kbps}")
+
+    for i, ln in enumerate(lines):
+        # Начало секций
+        if ln.startswith("m=video"):
+            in_video, in_audio = True, False
+            out.append(ln)
+            continue
+        if ln.startswith("m=audio"):
+            in_video, in_audio = False, True
+            out.append(ln)
+            continue
+        if ln.startswith("m="):  # любая другая секция
+            # перед уходом из предыдущей секции дольём параметры (если не успели)
+            if in_video:
+                inject_video_params(out)
+            if in_audio:
+                inject_audio_params(out)
+            in_video = in_audio = False
+            out.append(ln)
+            continue
+
+        # Копим строки секции
+        out.append(ln)
+
+        # Евристика: когда встречается следующая "a=" или "c=" — мы всё равно добавим в конце секции,
+        # поэтому основной инжект сделаем при переключении секций и после прохода.
+        # Ничего не делаем тут.
+
+    # Финальный инжект, если файл закончился внутри audio/video
+    if in_video:
+        inject_video_params(out)
+    if in_audio:
+        inject_audio_params(out)
+
+    return "\r\n".join(out) + "\r\n"
+
+import asyncio, logging, time
+from typing import Dict, Any, Tuple
+
+log = logging.getLogger("webrtc.encoder")
+
+def _g(o: Any, name: str, default=None):
+    return getattr(o, name, default)
+
+async def sample_encoder(pc, interval: float = 2.0):
+    """
+    Снимает энкодерные метрики для ВИДЕО из outbound-rtp:
+    - avg_enc_ms: Δ(totalEncodeTime)/Δ(framesEncoded)*1000
+    - eff_fps:    Δ(framesEncoded)/Δt (если нет track.fps)
+    - kbps:       Δ(bytesSent)*8/Δt/1000
+    """
+    prev: Dict[str, Dict[str, float]] = {}   # по ключу (ssrc|mid|id)
+    prev_ts: float | None = None
+
+    while True:
+        started = time.perf_counter()
+        try:
+            report = await pc.getStats()
+
+            outbound: Dict[str, Any] = {}
+            # Собираем ВСЕ outbound-rtp, а потом фильтруем по mediaType/kind
+            for s in report.values():
+                if _g(s, "type") == "outbound-rtp" and not _g(s, "isRemote", False):
+                    key = str(_g(s, "ssrc") or _g(s, "mid") or _g(s, "id"))
+                    outbound[key] = s
+
+            now = time.perf_counter()
+            dt = max(1e-9, (now - (prev_ts or now)))
+            lines = []
+
+            for key, o in outbound.items():
+                media = (_g(o, "mediaType") or _g(o, "kind") or "").lower()
+                if media != "video":  # <-- ✅ главный фикс: определяем видео без trackId
+                    continue
+
+                frames_total = float(_g(o, "framesEncoded", 0.0) or 0.0)
+                enc_time_total = float(_g(o, "totalEncodeTime", 0.0) or 0.0)  # секунды
+                bytes_total = float(_g(o, "bytesSent", 0.0) or 0.0)
+
+                p = prev.get(key, {"frames": frames_total, "enc_time": enc_time_total, "bytes": bytes_total})
+                d_frames = max(0.0, frames_total - p["frames"])
+                d_enc_time = max(0.0, enc_time_total - p["enc_time"])  # сек
+                d_bytes = max(0.0, bytes_total - p["bytes"])
+
+                avg_enc_ms = (d_enc_time / d_frames * 1000.0) if d_frames > 0 else None
+                eff_fps = (d_frames / dt) if d_frames > 0 else None
+                kbps = (d_bytes * 8.0 / dt) / 1000.0
+
+                lines.append({
+                    "stream": key,
+                    "eff_fps": round(eff_fps, 2) if eff_fps is not None else None,
+                    "frames+": int(d_frames),
+                    "avg_enc_ms": round(avg_enc_ms, 3) if avg_enc_ms is not None else None,
+                    "kbps": int(kbps),
+                })
+
+                prev[key] = {"frames": frames_total, "enc_time": enc_time_total, "bytes": bytes_total}
+
+            prev_ts = now
+
+            if lines:
+                s = " | ".join(
+                    f"video[{x['stream']}] eff_fps={x['eff_fps']} frames+={x['frames+']} "
+                    f"avg_enc_ms={x['avg_enc_ms']} kbps={x['kbps']}"
+                    for x in lines
+                )
+                log.info("[ENCODER] %s", s)
+            else:
+                # Помогаем себе диагностикой — какие outbound вообще видим
+                kinds_seen = [(_g(o, "mediaType") or _g(o, "kind")) for o in outbound.values()]
+                log.info("[ENCODER] no VIDEO outbound tracks yet (seen outbound=%s)", kinds_seen or "[]")
+
+        except Exception:
+            log.exception("encoder sampler error")
+
+        # стабильный период
+        next_tick = started + interval
+        await asyncio.sleep(max(0.0, next_tick - time.perf_counter()))
 
 async def process_offer(params: Dict[str, Any]) -> Dict[str, Any]:
     """Create peer connection and return answer dict for /offer route."""
@@ -89,21 +223,36 @@ async def process_offer(params: Dict[str, Any]) -> Dict[str, Any]:
     session = rand_id()
     pc = RTCPeerConnection()
 
-    await pc.setRemoteDescription(offer)
-
+    # FIX качество: создаём треки и задаём предпочтения кодеков ДО setRemoteDescription
     player = WebRTCMediaPlayer()
     pc.addTrack(player.audio)
     pc.addTrack(player.video)
 
-    # Prefer VP8 / H264 codecs for video
+    # FIX качество: Жёстко предпочитаем H264 с packetization-mode=1 (по опыту стабильнее для FullHD)
     for t in pc.getTransceivers():
         if t.kind == "video":
             caps = RTCRtpSender.getCapabilities("video")
-            prefs = [c for c in caps.codecs if c.name in ("VP8", "H264")]
-            t.setCodecPreferences(prefs)
+            h264_pmode1 = [
+                c for c in caps.codecs
+                if c.name == "H264" and c.parameters.get("packetization-mode") == "1"
+            ]
+            if h264_pmode1:
+                t.setCodecPreferences(h264_pmode1)
+            # если хочешь оставить fallback на VP8 — можно добавить сюда ветку
 
+    # Теперь применяем удалённый оффер
+    await pc.setRemoteDescription(offer)
+
+    # FIX качество: создаём answer, мундjim SDP — битрейт и FPS
     answer = await pc.createAnswer()
-    await pc.setLocalDescription(answer)
+    munged_sdp = sdp_set_bandwidth(
+        answer.sdp,
+        video_kbps=4000,  # FIX качество: подними/понизь по нуждам (пример: 6000 для FullHD 25 fps)
+        audio_kbps=128,
+        framerate=25,
+    )
+    await pc.setLocalDescription(RTCSessionDescription(sdp=munged_sdp, type=answer.type))
+
     logger.info("session %s established", session)
 
     async def remove_client_by_timeout():
@@ -117,6 +266,7 @@ async def process_offer(params: Dict[str, Any]) -> Dict[str, Any]:
     @pc.on("connectionstatechange")
     async def on_connection_state_change():  # noqa: D401
         if pc.connectionState == "connected":
+            # (оставил логику как в твоём коде)
             if not killer_task.cancelled() or not killer_task.done():
                 killer_task.cancel()
             try:
@@ -125,6 +275,7 @@ async def process_offer(params: Dict[str, Any]) -> Dict[str, Any]:
                 logger.info("CAN_SEND_FRAMES.set()")
                 CAN_SEND_FRAMES.set()
                 State.current_session_id = session
+                #asyncio.create_task(sample_encoder(pc))
             except asyncio.TimeoutError:
                 logger.info(f"Peer tried to connect to locked resource {session}")
                 await pc.close()
@@ -137,6 +288,7 @@ async def process_offer(params: Dict[str, Any]) -> Dict[str, Any]:
                 logger.info("CAN_SEND_FRAMES.clear()")
                 CAN_SEND_FRAMES.clear()
                 AVATAR_SET.clear()
+                STATE.auto_idle = True
                 try:
                     RTC_STREAM_CONNECTED.release()
                 except ValueError as e:

@@ -5,6 +5,7 @@ import asyncio
 import glob
 import logging
 import re
+import time
 import wave
 from pathlib import Path
 from typing import Deque, List, Tuple
@@ -62,21 +63,24 @@ async def stream_worker_aio() -> None:
     async def sender_generator():
         """Coroutine that yields RenderRequest messages."""
         # Send avatar image first
-        avatar_path = Path(DEFAULT_IMAGE_PATH)
-        if not avatar_path.exists():
-            raise RuntimeError(f"Avatar image '{DEFAULT_IMAGE_PATH}' not found")
-        img_bytes = avatar_path.read_bytes()
-        w, h = Image.open(avatar_path).size
-
-        yield render_service_pb2.RenderRequest(
-            image=render_service_pb2.ImageChunk(data=img_bytes, width=w, height=h),
-            online=True,
-            output_format = "RGB"
-        )
+        # avatar_path = Path(DEFAULT_IMAGE_PATH)
+        # if not avatar_path.exists():
+        #     raise RuntimeError(f"Avatar image '{DEFAULT_IMAGE_PATH}' not found")
+        # img_bytes = avatar_path.read_bytes()
+        # w, h = Image.open(avatar_path).size
+        #
+        # yield render_service_pb2.RenderRequest(
+        #     image=render_service_pb2.ImageChunk(data=img_bytes, width=w, height=h),
+        #     online=True,
+        #     output_format = "RGB"
+        # )
         avatar = STATE.avatar
         logger.info(f"Set avatar {avatar}")
-        yield render_service_pb2.RenderRequest(set_avatar=render_service_pb2.SetAvatar(avatar_id=avatar))
-        logger.debug("Initial avatar sent to render service (%dx%d)", w, h)
+        yield render_service_pb2.RenderRequest(set_avatar=render_service_pb2.SetAvatar(avatar_id=avatar),
+                                               online=True,
+                                               output_format="RGB"
+                                               )
+        #logger.debug("Initial avatar sent to render service (%dx%d)", w, h)
 
         # Stream audio seconds as they appear in queue with back-pressure from video
         MAX_INFLIGHT = settings.max_inflight_chunks          # секунды аудио, которые можем отправить «вперёд»
@@ -120,8 +124,8 @@ async def stream_worker_aio() -> None:
             pending_audio.append((audio_sec, sr, event))
 
             request = render_service_pb2.RenderRequest(
-                audio=render_service_pb2.AudioChunk(data=audio_sec.tobytes(), sample_rate=sr, bps=16),
-                online=True,
+                audio=render_service_pb2.AudioChunk(data=audio_sec.tobytes(), sample_rate=sr, bps=16, is_voice=is_speech),
+                online=True
             )
 
             yield request
@@ -130,7 +134,7 @@ async def stream_worker_aio() -> None:
                 evt, evt_payload = COMMANDS_QUEUE.get_nowait()
                 if evt == ServiceEvents.SET_ANIMATION:
                     logger.info(f"Request -> Playing animation {evt_payload}")
-                    yield render_service_pb2.RenderRequest(play_animation=render_service_pb2.PlayAnimation(animation=evt_payload))
+                    yield render_service_pb2.RenderRequest(play_animation=render_service_pb2.PlayAnimation(animation=evt_payload, auto_idle=STATE.auto_idle))
                 elif evt == ServiceEvents.SET_EMOTION:
                     logger.info(f"Request -> set emotion {evt_payload}")
                     yield render_service_pb2.RenderRequest(
@@ -150,6 +154,7 @@ async def stream_worker_aio() -> None:
     logger.info("Start reading chunks")
     prev_emotion = None
     try:
+        t_start = time.time()
         async for chunk in stub.RenderStream(sender_generator()):
             if not CAN_SEND_FRAMES.is_set():
                 logger.info("No clients - exiting receiver")
@@ -169,6 +174,12 @@ async def stream_worker_aio() -> None:
 
                 # Когда набрали минимальный пакет кадров
                 if len(frames_batch) == FRAMES_PER_CHUNK:
+                    t_sleep = (0.6 - (time.time() - t_start)) + 0.040
+
+                    if t_sleep > 0:
+                        logger.info(f"Sleep for {t_sleep}")
+                        await asyncio.sleep(t_sleep)
+                    t_start = time.time()
                     chunks_sem.release()
                     if pending_audio:
                         audio_chunk, _sr, event = pending_audio.popleft()

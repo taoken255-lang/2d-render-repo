@@ -165,6 +165,8 @@ async def handle_play_animation(message: Dict[str, Any], state: ClientState) -> 
         }
     animation = message.get("animation")
 
+    STATE.auto_idle = message.get("auto_idle", True)
+
     avatars_info = info()
 
     try:
@@ -182,7 +184,7 @@ async def handle_play_animation(message: Dict[str, Any], state: ClientState) -> 
                 "message": "Invalid animation."
             }
 
-    logger.info("Playing animation → %s", animation)
+    logger.info(f"Playing animation → {animation}, with auto_idle={STATE.auto_idle}", )
     COMMANDS_QUEUE.put_nowait((ServiceEvents.SET_ANIMATION, animation))
 
 async def handle_set_emotion(message: Dict[str, Any], state: ClientState) -> dict:
