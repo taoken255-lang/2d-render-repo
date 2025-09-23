@@ -84,7 +84,7 @@ def load_video(video_path, n_frames=-1, max_dim=-1):
 
 
 def load_source_frames(source_path, max_dim=-1, n_frames=-1): # <-----------------------------------------------------
-    if is_image(source_path):
+    if type(source_path) == bytes:
         rgb = load_image(source_path, max_dim)
         rgb_list = [rgb]
         is_image_flag = True

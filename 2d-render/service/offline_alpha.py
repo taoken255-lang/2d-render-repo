@@ -15,7 +15,7 @@ transform_image = transforms.Compose([
 
 class OfflineAlphaService:
     def __init__(self):
-        self.model = AutoModelForImageSegmentation.from_pretrained('/app/weights/BiRefNet-portrait',
+        self.model = AutoModelForImageSegmentation.from_pretrained('BiRefNet-portrait',
                                                                    trust_remote_code=True)
         self.model.eval()
         self.device = torch.device("cuda")

@@ -49,7 +49,7 @@ class ConditionHandler:
         emo: int | [int] | [[int]] | numpy
         """
         if ch_info is None:
-            source_info = copy.deepcopy(setup_info)
+            source_info = setup_info
         else:
             source_info = ch_info
 

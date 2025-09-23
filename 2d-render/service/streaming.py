@@ -53,16 +53,18 @@ class ImageObject:
 
 
 class AudioObject:
-	def __init__(self, data: bytes, sample_rate: int, bps: int):
+	def __init__(self, data: bytes, sample_rate: int, bps: int, is_voice: bool):
 		self.data = data
 		self.sample_rate = sample_rate
 		self.bps = bps
+		self.is_voice = is_voice
 
 
 class CommandObject:
-	def __init__(self, command_type: CommandDataType, command_data: str):
+	def __init__(self, command_type: CommandDataType, command_data: str, additional_data: dict = {}):
 		self.command_type = command_type
 		self.command_data = command_data
+		self.additional_data = additional_data
 
 
 class SharedValue:
@@ -137,14 +139,16 @@ def render_stream(chunk, render, is_last=False):
 		return
 
 	aud_chunk = chunk.data
+	is_voice = aud_chunk.is_voice
 
 	aud_sample_rate = aud_chunk.sample_rate if aud_chunk.sample_rate != 0 and aud_chunk.sample_rate else SampleRate
 	aud_bps = aud_chunk.bps if aud_chunk.bps != 0 and aud_chunk.bps else BitsPerSample
 	aud_data = aud_chunk.data
-
-	logger.debug(f"AUDIO DATA {len(aud_data)}, {aud_bps}, {aud_sample_rate}")
+	# aud_data = np.zeros_like(len(aud_data))
+	# is_voice = False
+	# logger.debug(f"AUDIO DATA {len(aud_data)}, {aud_bps}, {aud_sample_rate}")
 	# aud_time = len(aud_data) / ((aud_bps / 8) * aud_sample_rate)
-	render.render_chunk(aud_data, frame_rate=aud_sample_rate, is_last=is_last)
+	render.render_chunk(aud_data, frame_rate=aud_sample_rate, is_last=is_last, is_voice=is_voice)
 
 
 def stream_frames_thread(render, video_queue, height, width, start_time, request_id):
@@ -215,22 +219,23 @@ def start_render_process(audio_queue, video_queue, start_time, sampling_timestam
 				render_stream(chunk=chunk, render=render, is_last=True)
 				break
 
-			# if chunk.data_type == IPCDataType.IMAGE:
-			# 	logger.info("RECEIVE IMAGE CHUNK")
-			# 	img_chunk = chunk.data
-			#
-			# 	img_height = img_chunk.height
-			# 	img_width = img_chunk.width
-			# 	img_data = img_chunk.data
-			#
-			# 	render.handle_video(
-			# 		video_path='/app/assets/test.mp4',
-			# 		video_info_path='/app/assets/test.json')
-			#
-			# 	logger.info("START STREAMING THREAD")
-			# 	stream_thread = threading.Thread(target=stream_frames_thread, args=(
-			# 		render, video_queue, img_height, img_width, start_time, request_id,))
-			# 	stream_thread.start()
+			if chunk.data_type == IPCDataType.IMAGE:
+				logger.info("RECEIVE IMAGE CHUNK")
+				img_chunk = chunk.data
+
+				img_height = img_chunk.height
+				img_width = img_chunk.width
+				img_data = img_chunk.data
+				if img_width % 2 != 0 or img_height % 2 != 0:
+					video_queue.put(ErrorObject(error_type="image",
+					                            error_message=f"Size must be even, got {img_width}x{img_height}"))
+					continue
+				render.handle_image(image_chunk=img_data)
+
+				logger.info("START STREAMING THREAD")
+				stream_thread = threading.Thread(target=stream_frames_thread, args=(
+					render, video_queue, img_height, img_width, start_time, request_id,))
+				stream_thread.start()
 
 			elif chunk.data_type == IPCDataType.AUDIO:
 				logger.info("RECEIVE AUDIO CHUNK")
@@ -244,8 +249,8 @@ def start_render_process(audio_queue, video_queue, start_time, sampling_timestam
 					avatar_name = chunk.data.command_data
 
 					if avatar_name not in get_avatars():
-						video_queue.put(
-							ErrorObject(error_type="avatar", error_message=f"Avatar {avatar_name} does not exist"))
+						video_queue.put(ErrorObject(error_type="avatar",
+						                            error_message=f"Avatar {avatar_name} does not exist"))
 						continue
 
 					reader = imageio.get_reader(f'/app/assets/{avatar_name}/{avatar_name}.mp4')
@@ -253,16 +258,24 @@ def start_render_process(audio_queue, video_queue, start_time, sampling_timestam
 					img_width = int(size[0])
 					img_height = int(size[1])
 
+					if os.path.exists(f'/app/assets/{avatar_name}/ditto.json'):
+						with open(f'/app/assets/{avatar_name}/ditto.json', "r", encoding="utf-8") as f:
+							ditto_config = json.load(f)
+					else:
+						ditto_config = {}
+
 					if os.path.exists(f'/app/assets/{avatar_name}/emotions/'):
 						render.handle_video(
 							video_path=f'/app/assets/{avatar_name}/{avatar_name}.mp4',
 							video_info_path=f'/app/assets/{avatar_name}/{avatar_name}.json',
-							emotions_path=f'/app/assets/{avatar_name}/emotions/'
+							emotions_path=f'/app/assets/{avatar_name}/emotions/',
+							ditto_config=ditto_config
 						)
 					else:
 						render.handle_video(
 							video_path=f'/app/assets/{avatar_name}/{avatar_name}.mp4',
-							video_info_path=f'/app/assets/{avatar_name}/{avatar_name}.json'
+							video_info_path=f'/app/assets/{avatar_name}/{avatar_name}.json',
+							ditto_config=ditto_config
 						)
 
 					logger.info("START STREAMING THREAD")
@@ -273,12 +286,13 @@ def start_render_process(audio_queue, video_queue, start_time, sampling_timestam
 
 				elif chunk.data.command_type == CommandDataType.PlayAnimation:
 					animation_name = chunk.data.command_data
+					logger.info(animation_name)
 					logger.info(get_avatars())
 					if animation_name not in get_avatars()[avatar_name]["animations"]:
 						video_queue.put(ErrorObject(error_type="animation",
 						                            error_message=f"Animation {animation_name} for avatar {avatar_name} does not exist"))
 						continue
-					render.play_animation(animation=chunk.data.command_data)
+					render.play_animation(animation=chunk.data.command_data, auto_idle=chunk.data.additional_data["auto_idle"])
 
 				elif chunk.data.command_type == CommandDataType.SetEmotion:
 					render.set_emotion(emotion=chunk.data.command_data)
@@ -305,10 +319,10 @@ def reader_thread(request_iterator, audio_queue, is_online, is_alpha, output_for
 					sampling_timestamps.value = chunk.sampling_timestamps
 					output_format.set("BGRA" if chunk.output_format == "" else chunk.output_format)
 					audio_queue.put({"is_online": chunk.online})
-				# audio_queue.put(IPCObject(data_type=IPCDataType.IMAGE,
-				#                           data=ImageObject(data=chunk.image.data,
-				#                                            height=chunk.image.height,
-				#                                            width=chunk.image.width)))
+					audio_queue.put(IPCObject(data_type=IPCDataType.IMAGE,
+					                          data=ImageObject(data=chunk.image.data,
+					                                           height=chunk.image.height,
+					                                           width=chunk.image.width)))
 
 				elif chunk.audio.data:
 					bps_bytes = int(chunk.audio.bps / 8)
@@ -323,15 +337,26 @@ def reader_thread(request_iterator, audio_queue, is_online, is_alpha, output_for
 							audio_queue.put(IPCObject(data_type=IPCDataType.AUDIO,
 							                          data=AudioObject(data=cut_data,
 							                                           sample_rate=chunk.audio.sample_rate,
-							                                           bps=chunk.audio.bps)))
+							                                           bps=chunk.audio.bps,
+							                                           is_voice=chunk.audio.is_voice)))
 
 					else:
 						audio_queue.put(IPCObject(data_type=IPCDataType.AUDIO,
 						                          data=AudioObject(data=chunk.audio.data,
 						                                           sample_rate=chunk.audio.sample_rate,
-						                                           bps=chunk.audio.bps)))
+						                                           bps=chunk.audio.bps,
+						                                           is_voice=chunk.audio.is_voice)))
 
 				elif chunk.WhichOneof("command") == "set_avatar":
+					logger.info(f"ONLINE MODE: {chunk.online}")
+					logger.info(f"ALPHA MODE: {chunk.alpha}")
+					if chunk.online:
+						is_online.set()
+					if chunk.alpha:
+						is_alpha.set()
+					sampling_timestamps.value = chunk.sampling_timestamps
+					output_format.set("BGRA" if chunk.output_format == "" else chunk.output_format)
+					audio_queue.put({"is_online": chunk.online})
 					audio_queue.put(IPCObject(data_type=IPCDataType.COMMAND,
 					                          data=CommandObject(command_type=CommandDataType.SetAvatar,
 					                                             command_data=chunk.set_avatar.avatar_id)))
@@ -339,7 +364,8 @@ def reader_thread(request_iterator, audio_queue, is_online, is_alpha, output_for
 				elif chunk.WhichOneof("command") == "play_animation":
 					audio_queue.put(IPCObject(data_type=IPCDataType.COMMAND,
 					                          data=CommandObject(command_type=CommandDataType.PlayAnimation,
-					                                             command_data=chunk.play_animation.animation)))
+					                                             command_data=chunk.play_animation.animation,
+					                                             additional_data={"auto_idle": chunk.play_animation.auto_idle})))
 
 				elif chunk.WhichOneof("command") == "set_emotion":
 					audio_queue.put(IPCObject(data_type=IPCDataType.COMMAND,
@@ -472,10 +498,12 @@ class StreamingService(render_service_pb2_grpc.RenderServiceServicer):
 							if frame.event_data["event"]:
 								yield RenderResponse(
 									start_animation=StartAnimation(animation_name=frame.event_data["name"]))
+								ev = 1
 							else:
 								yield RenderResponse(
 									end_animation=EndAnimation(animation_name=frame.event_data["name"]))
-							logger.info(f"SENT ANIMATION EVENT")
+								ev = 0
+							logger.info(f"SENT ANIMATION EVENT {frame.event_data['name']} {ev}")
 						elif frame.event_name == "emotion":
 							yield RenderResponse(
 								emotion_set=EmotionSet(emotion_name=frame.event_data["name"]))

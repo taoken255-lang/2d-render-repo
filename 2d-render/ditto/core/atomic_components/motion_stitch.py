@@ -447,6 +447,40 @@ class MotionStitch:
         if kwargs.get("vad_alpha", 1) < 1:
             x_d_info = ctrl_vad(x_d_info, x_s_info, kwargs.get("vad_alpha", 1))
 
+        if not hasattr(self, '_silence_counter'):
+            self._silence_counter = 0
+            self._current_alpha = 1.0
+
+        current_silence = not kwargs.get("is_voice", True)
+        silence_threshold = kwargs.get("silence_threshold", 5)  # Порог кадров (по умолчанию 50 = 2 секунды)
+        silence_alpha = kwargs.get("silence_alpha", 0.1)  # Коэффициент ослабления (по умолчанию 0.1)
+        transition_frames = kwargs.get("silence_transition_frames",
+                                       10)  # Кадры для плавного перехода (по умолчанию 10 = 400ms)
+
+        if current_silence:
+            self._silence_counter += 1
+        else:
+            # Если пришел голос - сбрасываем счетчик
+            self._silence_counter = 0
+
+        # Определяем целевую альфу
+        if self._silence_counter > silence_threshold:
+            target_alpha = silence_alpha  # 0.1
+        else:
+            target_alpha = 1.0  # Нормальное состояние
+
+        # Плавный переход к целевой альфе
+        alpha_diff = target_alpha - self._current_alpha
+        alpha_step = alpha_diff / transition_frames
+        self._current_alpha += alpha_step
+
+        # Ограничиваем диапазон
+        self._current_alpha = max(silence_alpha, min(1.0, self._current_alpha))
+
+        # Применяем ослабление если альфа меньше 1.0
+        if self._current_alpha < 1.0:
+            x_d_info = ctrl_vad(x_d_info, x_s_info, self._current_alpha)
+
         x_d_info = ctrl_motion(x_d_info, **kwargs)
 
         if self.fade_type == "d0" and self.fade_dst is None:

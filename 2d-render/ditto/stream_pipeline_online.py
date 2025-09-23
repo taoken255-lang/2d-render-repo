@@ -48,6 +48,16 @@ class EventObject:
         self.event_data = event_data
 
 
+class RenderAnimationObject:
+    def __init__(self, render_data):
+        self.render_data = render_data
+
+
+class RenderEmotionObject:
+    def __init__(self, render_data):
+        self.render_data = render_data
+
+
 class StreamSDK:
     def __init__(self, cfg_pkl, data_root, **kwargs):
 
@@ -111,7 +121,7 @@ class StreamSDK:
         """
         Add video segment to buffer.
         """
-        logger.info(f"add video segment {video_segment_name} into buffer({self.video_segment_buffer})")
+        logger.info(f"add video segment {video_segment_name[0]} into buffer({self.video_segment_buffer})")
 
         self.video_segment_buffer.append(video_segment_name)
 
@@ -195,10 +205,11 @@ class StreamSDK:
 
         # -- motion_stitch: setup --
         self.N_d = kwargs.get("N_d", -1)
-        self.use_d_keys = kwargs.get("use_d_keys", None)
+        self.use_d_keys = kwargs.get("use_d_keys", {"exp": 1.0, "pitch": 0.3, "yaw": 0.3, "roll": 0.3, "t": 1})
         self.relative_d = kwargs.get("relative_d", True)
         self.drive_eye = kwargs.get("drive_eye", None)    # None: true4image, false4video
         self.delta_eye_arr = kwargs.get("delta_eye_arr", None)
+        self.delta_eye_arr = np.zeros_like(self.delta_eye_arr)
         self.delta_eye_open_n = kwargs.get("delta_eye_open_n", 0)
         self.fade_type = kwargs.get("fade_type", "")    # "" | "d0" | "s"
         self.fade_out_keys = kwargs.get("fade_out_keys", ("exp",))
@@ -232,7 +243,7 @@ class StreamSDK:
             "crop_flag_do_rot": self.crop_flag_do_rot,
         }
         n_frames = self.template_n_frames if self.template_n_frames > 0 else self.N_d  # ? -1 картинка, больше - видос
-        logger.info(f"source_path: {source_path}")
+        # logger.info(f"source_path: {source_path}")
         source_info = self.avatar_registrar(
             source_path,
             max_dim=self.max_size,
@@ -328,8 +339,9 @@ class StreamSDK:
         logger.info("------------------------------ ALL THREADS STARTED ------------------------------")
 
         video_segments_path = kwargs.get("video_segments_path", None)
+        self.video_exists = False
         if video_segments_path:
-
+            self.video_exists = True
             self.setup_video_segments(video_segments_path)
 
         emotions_info_path = kwargs.get("emotions_path", None)
@@ -337,6 +349,9 @@ class StreamSDK:
         if emotions_info_path:
             self.emotion_exists = True
             self.setup_emotions(kwargs['emotions_path'])
+
+        logger.info(f"ANIMATIONS: {self.video_exists}")
+        logger.info(f"EMOTIONS: {self.emotion_exists}")
 
     def setup_emotions(self, emotions_path: str):
         emotions_info_path = f"{emotions_path}/info.json"
@@ -396,6 +411,7 @@ class StreamSDK:
         self.video_segment_info = self.video_segment_info
         self.video_segment_buffer = []
         self.video_segment_current = "idle"
+        self.video_segment_auto_idle = True
         self.video_segment_previous = ""
 
         # Handle global gen frame index
@@ -572,6 +588,9 @@ class StreamSDK:
                 if isinstance(item, EventObject):
                     self.warp_f3d_queue.put(item)
                     continue
+                elif isinstance(item, RenderEmotionObject):
+                    self.add_emotion(emotion_name=item.render_data)
+                    continue
                 # if first_flag:
                 #     ms_start_time = time.perf_counter()
                 #     first_flag = False
@@ -581,11 +600,12 @@ class StreamSDK:
                 self.warp_f3d_queue.put(None)
                 # logger.info(ms_res_time_list)
                 break
-
+            item, is_voice = item
             # Короче x_s - Motion Extractor, f_s - Appearance Extractor
 
             frame_idx, x_d_info, ctrl_kwargs = item  # Получаем данные из audio2motion (x_d_info - кадр-кейпоинт)
-            x_s_info = self.source_info["x_s_info_lst"][frame_idx]  # Данные по картинке - ? motion extractor по кадру (? кадр 1 для картинки)
+            ctrl_kwargs['is_voice'] = is_voice
+            x_s_info = self.source_info["x_s_info_lst"][frame_idx]  # Данные по картинке - ? motion extractor по кадру (? кадр 1 для картинки
             if not self.emotion_exists:
                 x_s, x_d = self.motion_stitch(x_s_info, x_d_info, **ctrl_kwargs)
             else:
@@ -660,7 +680,14 @@ class StreamSDK:
                 continue
             if item is None:
                 is_end = True
+            elif isinstance(item, RenderEmotionObject):
+                self.motion_stitch_queue.put(item)
+                continue
+            elif isinstance(item, RenderAnimationObject):
+                self.add_video_segment(video_segment_name=item.render_data)
+                continue
             else:
+                item, is_voice = item
                 item_buffer = np.concatenate([item_buffer, item], 0)
 
             if not is_end and item_buffer.shape[0] < valid_clip_len:  # 10
@@ -702,73 +729,69 @@ class StreamSDK:
                     x_d_info_list = self.audio2motion.cvt_fmt(valid_res_kp_seq)  # Список кадров-кейпоинтов формата [{np[]}, ...]
 
                     for x_d_info in x_d_info_list:
-
+                        if self.video_exists:
                         # ------------------- Manage Video Segments -------------------
-                        video_segment = self.video_segment_info[self.video_segment_current]
-                        if self.gen_frame_idx >= video_segment["end"]:
-                            # if current video segment is ended, switch to idle
-                            if len(self.video_segment_buffer) > 0:
-                                self.video_segment_current = self.video_segment_buffer.pop(0)
-                                self.gen_frame_idx = self.video_segment_info[self.video_segment_current]["start"]
-                            else:
-                                self.video_segment_current = "idle"  # тест анимация за анимацией
-                                self.gen_frame_idx = self.video_segment_info["idle"]["start"]
+                            video_segment = self.video_segment_info[self.video_segment_current]
+                            if self.gen_frame_idx >= video_segment["end"]:
+                                # if current video segment is ended, switch to idle
+                                if len(self.video_segment_buffer) > 0:
+                                    new_video_segment = self.video_segment_buffer.pop(0)
+                                    self.video_segment_current = new_video_segment[0]
+                                    self.video_segment_auto_idle = new_video_segment[1]
+                                    self.gen_frame_idx = self.video_segment_info[self.video_segment_current]["start"]
+                                else:
+                                    if self.video_segment_auto_idle:
+                                        self.video_segment_current = "idle"  # тест анимация за анимацией
+                                        logger.info(f"SWITCH TO IDLE CAUSE AUTO IDLE {self.video_segment_auto_idle}")
+                                    self.gen_frame_idx = self.video_segment_info[self.video_segment_current]["start"]
 
-                            # if self.video_segment_current != "idle":  # очередь без айдла
-                            #     self.video_segment_current = "idle"  # тест анимация за анимацией
-                            #     self.gen_frame_idx = self.video_segment_info["idle"]["start"]
-                            # else:
-                            #     # if video segment buffer is not empty, switch to next video segment
-                            #     if len(self.video_segment_buffer) > 0:
-                            #         self.video_segment_current = self.video_segment_buffer.pop(0)
-                            #         self.gen_frame_idx = self.video_segment_info[self.video_segment_current]["start"]
+                            frame_idx = _mirror_index(
+                                self.gen_frame_idx,
+                                self.video_segment_info[self.video_segment_current]["end"])
+                            frame_idx = max(0, min(frame_idx, self.source_info_frames - 1))
 
-                        # if len(self.video_segment_buffer) > 0:
-                        #     self.video_segment_current = self.video_segment_buffer.pop(0)
-                        #     self.gen_frame_idx = self.video_segment_info[self.video_segment_current]["start"]
-                        # else:
-                        #     self.video_segment_current = "idle"  # тест анимация за анимацией
-                        #     self.gen_frame_idx = self.video_segment_info["idle"]["start"]
+                            if getattr(self, 'is_image_flag', False):
+                                frame_idx = 0
+                            ctrl_kwargs = {}
+                        # -------------------------------------------------------------
+                        else:
 
-
-                        frame_idx = _mirror_index(
-                            self.gen_frame_idx,
-                            self.video_segment_info[self.video_segment_current]["end"])
-                        frame_idx = max(0, min(frame_idx, self.source_info_frames - 1))
-
-                        if getattr(self, 'is_image_flag', False):
-                            frame_idx = 0
-                        # --------------------------------------------------------------
-                        # logger.info(f"frame_idx: {frame_idx} gen_frame_idx {self.gen_frame_idx} video_segment_current {self.video_segment_current} self.video_segment_buffer {self.video_segment_buffer}")
-                        # frame_idx = _mirror_index(gen_frame_idx, self.source_info_frames)  # ? Индекс кадра
-                        ctrl_kwargs = {} # self._get_ctrl_info(gen_frame_idx)  # ? Управляющие параметры
-
-                        # a2m_res_time_list.append(time.perf_counter() - self.union_start)
+                            frame_idx = _mirror_index(gen_frame_idx, self.source_info_frames)  # ? Индекс кадра
+                            ctrl_kwargs = self._get_ctrl_info(gen_frame_idx)  # ? Управляющие параметры
 
                         while not self.stop_event.is_set():
                             try:
-                                if self.video_segment_current != self.video_segment_previous:
-                                    if self.video_segment_previous == "":
-                                        self.motion_stitch_queue.put(EventObject(event_name="animation", event_data={
-                                            "name": self.video_segment_current,
-                                            "event": 1
-                                        }))
-                                    else:
-                                        self.motion_stitch_queue.put(EventObject(event_name="animation", event_data={
-                                            "name": self.video_segment_previous,
-                                            "event": 0
-                                        }))
-                                        self.motion_stitch_queue.put(EventObject(event_name="animation", event_data={
-                                            "name": self.video_segment_current,
-                                            "event": 1
-                                        }))
+                                if self.video_exists:
+                                    if self.video_segment_current != self.video_segment_previous:
+                                        # logger.info(self.video_segment_previous)
+                                        # logger.info(self.video_segment_current)
+                                        # logger.info(is_voice)
+                                        if self.video_segment_previous == "":
+                                            self.motion_stitch_queue.put(EventObject(event_name="animation", event_data={
+                                                "name": self.video_segment_current,
+                                                "event": 1
+                                            }))
+                                        else:
+                                            self.motion_stitch_queue.put(EventObject(event_name="animation", event_data={
+                                                "name": self.video_segment_previous,
+                                                "event": 0
+                                            }))
+                                            self.motion_stitch_queue.put(EventObject(event_name="animation", event_data={
+                                                "name": self.video_segment_current,
+                                                "event": 1
+                                            }))
+
+                                self.motion_stitch_queue.put(([frame_idx, x_d_info, ctrl_kwargs], is_voice))  # Кладем в очередь обработчика
+                                if self.video_exists:
                                     self.video_segment_previous = self.video_segment_current
-                                self.motion_stitch_queue.put([frame_idx, x_d_info, ctrl_kwargs], timeout=1)  # Кладем в очередь обработчика
                                 break
                             except queue.Full:
                                 continue
 
-                        self.gen_frame_idx += 1
+                        if self.video_exists:
+                            self.gen_frame_idx += 1
+                        else:
+                            gen_frame_idx += 1
 
                     res_kp_seq_valid_start += real_valid_len
 
@@ -792,10 +815,11 @@ class StreamSDK:
 
             if is_end:
                 break
-        self.motion_stitch_queue.put(EventObject(event_name="animation", event_data={
-            "name": self.video_segment_current,
-            "event": 0
-        }))
+        if self.video_exists:
+            self.motion_stitch_queue.put(EventObject(event_name="animation", event_data={
+                "name": self.video_segment_current,
+                "event": 0
+            }))
         self.motion_stitch_queue.put(None)
         # logger.info(a2m_res_time_list)
 
@@ -816,18 +840,23 @@ class StreamSDK:
         if self.worker_exception is not None:
             raise self.worker_exception
 
-    def run_chunk(self, audio_chunk, chunksize=(3, 5, 2)):
+    def run_chunk(self, audio_chunk, chunksize=(3, 5, 2), is_voice: bool = False):
         # only for hubert
-        aud_feat = self.wav2feat(audio_chunk, chunksize=chunksize)  # aud_feat - audio features через HuBERT
-        while not self.stop_event.is_set():
-            try:
-                if self.first_chunk:
-                    self.union_start = time.perf_counter()
-                    self.first_chunk = False
-                self.audio2motion_queue.put(aud_feat, timeout=1)
-                break
-            except queue.Full:
-                continue
+        # is_voice = False
+        # audio_chunk = np.zeros_like(audio_chunk)
+        if isinstance(audio_chunk, RenderEmotionObject) or isinstance(audio_chunk, RenderAnimationObject):
+            self.audio2motion_queue.put(audio_chunk)
+        else:
+            aud_feat = self.wav2feat(audio_chunk, chunksize=chunksize)  # aud_feat - audio features через HuBERT
+            while not self.stop_event.is_set():
+                try:
+                    if self.first_chunk:
+                        self.union_start = time.perf_counter()
+                        self.first_chunk = False
+                    self.audio2motion_queue.put((aud_feat, is_voice), timeout=1)
+                    break
+                except queue.Full:
+                    continue
 
 
 
