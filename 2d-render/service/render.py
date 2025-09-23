@@ -16,7 +16,7 @@ class RenderService:
 	def __init__(self, is_online: bool = False, sampling_timestamps: int = 0):
 		self.is_online = is_online
 		self.sampling_timestamps = sampling_timestamps
-		cfg_pkl = "./checkpoints/ditto_cfg/v0.4_hubert_cfg_trt_online.pkl"
+		cfg_pkl = "/app/weights/checkpoints/ditto_cfg/v0.4_hubert_cfg_trt_online.pkl"
 		data_root = Config.DITTO_DATA_ROOT
 
 		if is_online:
