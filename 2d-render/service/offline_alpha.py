@@ -5,6 +5,7 @@ import numpy as np
 from torchvision import transforms
 from transformers import AutoModelForImageSegmentation
 from PIL import Image
+from config import Config
 
 transform_image = transforms.Compose([
     transforms.Resize((1024, 1024)),
@@ -15,7 +16,7 @@ transform_image = transforms.Compose([
 
 class OfflineAlphaService:
     def __init__(self):
-        self.model = AutoModelForImageSegmentation.from_pretrained('/app/weights/BiRefNet-portrait',
+        self.model = AutoModelForImageSegmentation.from_pretrained(f'{Config.WEIGHTS_PATH}/BiRefNet-portrait',
                                                                    trust_remote_code=True)
         self.model.eval()
         self.device = torch.device("cuda")

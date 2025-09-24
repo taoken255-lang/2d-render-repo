@@ -16,7 +16,7 @@ class RenderService:
 	def __init__(self, is_online: bool = False, sampling_timestamps: int = 0):
 		self.is_online = is_online
 		self.sampling_timestamps = sampling_timestamps
-		cfg_pkl = "/app/weights/checkpoints/ditto_cfg/v0.4_hubert_cfg_trt_online.pkl"
+		cfg_pkl = f"{Config.WEIGHTS_PATH}/checkpoints/ditto_cfg/v0.4_hubert_cfg_trt_online.pkl"
 		data_root = Config.DITTO_DATA_ROOT
 
 		if is_online:
@@ -61,6 +61,7 @@ class RenderService:
 
 		args = {"online_mode": self.is_online,
 		        "sampling_timesteps": sts,
+		        "max_size": int(Config.MAX_SIZE),
 		        "QUEUE_MAX_SIZE": int(Config.QUEUE_MAX_SIZE),
 		        "MS_MAX_SIZE": int(Config.MS_MAX_SIZE),
 		        "A2M_MAX_SIZE": int(Config.A2M_MAX_SIZE)}
@@ -79,6 +80,7 @@ class RenderService:
 				"video_segments_path": video_info_path,
 				"emotions_path": emotions_path,
 		        "sampling_timesteps": sts,
+		        "max_size": int(Config.MAX_SIZE),
 		        "QUEUE_MAX_SIZE": int(Config.QUEUE_MAX_SIZE),
 		        "MS_MAX_SIZE": int(Config.MS_MAX_SIZE),
 		        "A2M_MAX_SIZE": int(Config.A2M_MAX_SIZE)}

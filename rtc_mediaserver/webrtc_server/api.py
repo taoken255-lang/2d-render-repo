@@ -6,11 +6,13 @@ import json
 import logging
 import random
 import time
+from json import JSONDecodeError
 from pathlib import Path
 from typing import Any, Dict, Optional, Union
 
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.exceptions import RequestValidationError
 from aiortc import RTCPeerConnection, RTCSessionDescription, RTCDataChannel, RTCConfiguration  # type: ignore
 from aiortc.rtcrtpsender import RTCRtpSender  # type: ignore
 from starlette.middleware.cors import CORSMiddleware
@@ -30,6 +32,18 @@ setup_default_logging()
 logger = get_logger(__name__)
 
 app = FastAPI(title="Threaded WebRTC Server")
+
+# Exception handler for invalid JSON
+@app.exception_handler(JSONDecodeError)
+async def json_decode_error_handler(request: Request, exc: JSONDecodeError):
+    return JSONResponse(
+        status_code=400,
+        content={
+            "type": "error", 
+            "code": "UNKNOWN_ERROR",
+            "message": "Unknown error occured."
+        }
+    )
 
 origins = ["*"]
 
@@ -73,8 +87,12 @@ async def get_info() -> JSONResponse:
     except Exception as e:
         logger.error(f"Error getting info data: {e}")
         return JSONResponse(
-            status_code=500,
-            content={"error": "Failed to get info data"}
+            status_code=400,
+            content={
+                "type": "error",
+                "code": "UNKNOWN_ERROR",
+                "message": "Unknown error occured."
+            }
         )
 
 # ───────────────────────── WebRTC offer logic ──────────────────────────
@@ -254,7 +272,6 @@ async def process_offer(params: Dict[str, Any]) -> Dict[str, Any]:
     await pc.setLocalDescription(RTCSessionDescription(sdp=munged_sdp, type=answer.type))
 
     logger.info("session %s established", session)
-
     async def remove_client_by_timeout():
         logger.info(f">> killer wait for timeout to close webrtc channel for client {session}")
         await asyncio.sleep(float(settings.uninitialized_rtc_kill_timeout))
@@ -304,6 +321,18 @@ async def process_offer(params: Dict[str, Any]) -> Dict[str, Any]:
 
 @app.post("/offer")
 async def offer(request: Request):  # type: ignore[override]
+    # Check Content-Type header
+    content_type = request.headers.get("content-type", "").lower()
+    if not content_type.startswith("application/json"):
+        return JSONResponse(
+            status_code=400,
+            content={
+                "type": "error",
+                "code": "UNKNOWN_ERROR",
+                "message": "Unknown error occured."
+            }
+        )
+    
     if RTC_STREAM_CONNECTED.locked():
         return JSONResponse(status_code=423, content=
             {
@@ -312,9 +341,44 @@ async def offer(request: Request):  # type: ignore[override]
               "message": "Reached max count of connected clients. Service busy."
             }
         )
-    params = await request.json()
-    answer_dict = await process_offer(params)
-    return JSONResponse(answer_dict)
+    
+    try:
+        params = await request.json()
+    except JSONDecodeError:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "type": "error",
+                "code": "UNKNOWN_ERROR",
+                "message": "Unknown error occured."
+            }
+        )
+
+    request_type = params.get("type", None)
+    sdp = params.get("sdp", None)
+
+    if not params or not request_type or not sdp or request_type != "offer":
+        return JSONResponse(
+            status_code=400,
+            content={
+                "type": "error",
+                "code": "UNKNOWN_ERROR",
+                "message": "Unknown error occured."
+            }
+        )
+
+    try:
+        answer_dict = await process_offer(params)
+        return JSONResponse(answer_dict)
+    except:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "type": "error",
+                "code": "UNKNOWN_ERROR",
+                "message": "Unknown error occured."
+            }
+        )
 
 # ───────────────────────── Control websocket ───────────────────────────
 
