@@ -185,12 +185,6 @@ async def stream_worker_aio() -> None:
                         audio_chunk, _sr, event = pending_audio.popleft()
                         if event and event == ServiceEvents.EOS:
                             USER_EVENTS.put_nowait({"type": "eos"})
-                            # if ANIMATION_CALLED.is_set():
-                            #     USER_EVENTS.put_nowait({"type": "animationEnded"})
-                            #     ANIMATION_CALLED.clear()
-                            # if EMOTION_CALLED.is_set():
-                            #     USER_EVENTS.put_nowait({"type": "emotionEnded"})
-                            #     EMOTION_CALLED.clear()
                             await asyncio.sleep(0)
                         elif event and event == ServiceEvents.INTERRUPT:
                             USER_EVENTS.put_nowait({"type": "interrupted"})

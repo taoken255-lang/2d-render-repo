@@ -12,6 +12,7 @@ from queue import Queue as tQueue
 from grpc import RpcError
 from uuid import uuid4
 from enum import Enum
+from config import Config
 import imageio
 import json
 import os
@@ -152,6 +153,11 @@ def render_stream(chunk, render, is_last=False):
 
 
 def stream_frames_thread(render, video_queue, height, width, start_time, request_id):
+	if int(Config.MAX_SIZE) < width:
+		new_width = int(Config.MAX_SIZE)
+		new_height = int(round(height * int(Config.MAX_SIZE) / width))
+		height = new_height
+		width = new_width
 	with logger.contextualize(request_id=request_id):
 		# time_chunks_list = []
 		# dt_full_time = 0

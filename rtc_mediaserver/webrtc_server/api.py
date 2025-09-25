@@ -283,7 +283,7 @@ async def process_offer(params: Dict[str, Any]) -> Dict[str, Any]:
     @pc.on("connectionstatechange")
     async def on_connection_state_change():  # noqa: D401
         if pc.connectionState == "connected":
-            # (оставил логику как в твоём коде)
+
             if not killer_task.cancelled() or not killer_task.done():
                 killer_task.cancel()
             try:
@@ -292,7 +292,7 @@ async def process_offer(params: Dict[str, Any]) -> Dict[str, Any]:
                 logger.info("CAN_SEND_FRAMES.set()")
                 CAN_SEND_FRAMES.set()
                 State.current_session_id = session
-                #asyncio.create_task(sample_encoder(pc))
+                STATE.current_pc = pc
             except asyncio.TimeoutError:
                 logger.info(f"Peer tried to connect to locked resource {session}")
                 await pc.close()
@@ -304,7 +304,6 @@ async def process_offer(params: Dict[str, Any]) -> Dict[str, Any]:
             if session == State.current_session_id:
                 logger.info("CAN_SEND_FRAMES.clear()")
                 CAN_SEND_FRAMES.clear()
-                AVATAR_SET.clear()
                 STATE.auto_idle = True
                 try:
                     RTC_STREAM_CONNECTED.release()
@@ -334,13 +333,14 @@ async def offer(request: Request):  # type: ignore[override]
         )
     
     if RTC_STREAM_CONNECTED.locked():
-        return JSONResponse(status_code=423, content=
-            {
-              "type": "error",
-              "code": "SERVICE_BUSY",
-              "message": "Reached max count of connected clients. Service busy."
-            }
-        )
+        await STATE.current_pc.close()
+        # return JSONResponse(status_code=423, content=
+        #     {
+        #       "type": "error",
+        #       "code": "SERVICE_BUSY",
+        #       "message": "Reached max count of connected clients. Service busy."
+        #     }
+        # )
     
     try:
         params = await request.json()

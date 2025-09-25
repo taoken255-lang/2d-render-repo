@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     websocket_port: int = 8001
     
     # gRPC settings
-    grpc_server_url: str = "localhost:8502" #"2d.digitalavatars.ru"  # Default 2d-render port
+    grpc_server_url: str = "localhost:8501" #"2d.digitalavatars.ru"  # Default 2d-render port
     grpc_secure_channel: bool = False
 
     # Audio settings

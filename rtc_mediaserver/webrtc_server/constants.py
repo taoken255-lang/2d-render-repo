@@ -20,7 +20,9 @@ __all__ = [
     "FRAMES_PER_CHUNK",
 ]
 
-from rtc_mediaserver.webrtc_server.shared import SYNC_QUEUE, SYNC_QUEUE_SEM
+from aiortc import RTCPeerConnection
+
+from rtc_mediaserver.webrtc_server.shared import SYNC_QUEUE, SYNC_QUEUE_SEM, AUDIO_SECOND_QUEUE
 
 
 class AudioParams:
@@ -95,6 +97,7 @@ class State:
         self.avatar: str = None
         self.current_session_id = None
         self.auto_idle: bool = True
+        self.current_pc: RTCPeerConnection = None
 
     def kill_streamer(self):
         if self.streamer_task:
@@ -115,6 +118,8 @@ class State:
 
         while not SYNC_QUEUE.empty():
             try:
+                AUDIO_SECOND_QUEUE.get_nowait()
+                AUDIO_SECOND_QUEUE.task_done()
                 SYNC_QUEUE.get_nowait()
                 SYNC_QUEUE.task_done()
             except Exception:  # noqa: BLE001
