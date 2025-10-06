@@ -44,6 +44,14 @@ class Settings(BaseSettings):
 
     debug_page_enabled: bool = True
 
+    elevenlabs_api_url: str = "https://karimrashid.metahumansdk.io/" #"https://api.elevenlabs.io/"
+    elevenlabs_ws_url: str = "wss://karimrashid.metahumansdk.io/"
+    elevenlabs_api_key: Optional[str] = None
+    elevenlabs_voice_id: Optional[str] = None
+    elevenlabs_model_id: str = "eleven_flash_v2_5"
+    elevenlabs_optimize: int = 1
+    elevenlabs_voice_speed: float = 1.1
+    elevenlabs_type: str = "http"
 
 # Global settings instance
 settings = Settings() 

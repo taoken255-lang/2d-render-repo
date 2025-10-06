@@ -25,6 +25,8 @@ from .grpc_client import stream_worker_forever
 from .player import WebRTCMediaPlayer
 from .handlers import HANDLERS, ClientState
 from .info import info
+from .tts.elevenlabs import synthesize_worker
+from .webrtc_manager import webrtc_manager
 from ..config import settings
 
 # Ensure logging configured
@@ -66,9 +68,16 @@ def rand_id() -> int:
 
 @app.on_event("startup")
 async def _startup_event() -> None:
-    """Launch gRPC stream worker with auto-restart on app startup."""
+    """Launch gRPC stream worker and isolated WebRTC thread on app startup."""
+    # Запускаем изолированный WebRTC поток
+    webrtc_manager.start()
+    
+    # Запускаем gRPC worker в главном loop 
     t = asyncio.create_task(stream_worker_forever())
     logger.info("gRPC aio worker task created (auto-restart enabled)")
+    logger.info("🚀 Isolated WebRTC thread started")
+
+    t1 = asyncio.create_task(synthesize_worker())
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -368,15 +377,19 @@ async def offer(request: Request):  # type: ignore[override]
         )
 
     try:
-        answer_dict = await process_offer(params)
+        # 🚀 Используем изолированный WebRTC поток
+        logger.info("Processing WebRTC offer in isolated thread")
+        answer_dict = await webrtc_manager.process_offer_async(params)
+        logger.info("WebRTC offer processed successfully")
         return JSONResponse(answer_dict)
-    except:
+    except Exception as e:
+        logger.error(f"❌ WebRTC offer processing failed: {e}")
         return JSONResponse(
-            status_code=400,
+            status_code=500,
             content={
                 "type": "error",
-                "code": "UNKNOWN_ERROR",
-                "message": "Unknown error occured."
+                "code": "WEBRTC_ERROR",
+                "message": f"WebRTC processing failed: {str(e)}"
             }
         )
 
@@ -453,4 +466,7 @@ async def control_ws(websocket: WebSocket):  # type: ignore[override]
 
 @app.on_event("shutdown")
 async def _shutdown() -> None:
-    logger.info("Application shutdown – all peer connections closed")
+    logger.info("Application shutdown – stopping WebRTC thread")
+    # Останавливаем изолированный WebRTC поток
+    webrtc_manager.stop()
+    logger.info("Application shutdown complete")

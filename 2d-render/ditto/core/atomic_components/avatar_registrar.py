@@ -1,8 +1,14 @@
 import numpy as np
-
-from .loader import load_source_frames
+from .loader import *
+from tqdm import tqdm
 from .source2info import Source2Info
 from loguru import logger
+import torch
+import os
+import pickle
+import hashlib
+from datetime import datetime
+import glob
 
 
 def _mean_filter(arr, k):
@@ -15,6 +21,28 @@ def _mean_filter(arr, k):
         res.append(arr[s:e].mean(0))
     res = np.stack(res, 0)
     return res
+
+
+def is_video(file_path):
+    return filetype.is_video(file_path)
+
+
+def load_image(image_bytes, max_dim=-1):   # <--------------------------------------------------------------------------
+    nparr = np.frombuffer(image_bytes, np.uint8)
+    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    h, w = img.shape[:2]
+    if h % 2 != 0:
+        img = img[:h - 1, :, :]
+        h -= 1
+    if w % 2 != 0:
+        img = img[:, :w - 1, :]
+        w -= 1
+    logger.info(f"REGISTER AVATAR {w}x{h}, {len(img)}")
+    new_h, new_w, rsz_flag = check_resize(h, w, max_dim)  # Ресайз под максимальный размер
+    if rsz_flag:
+        img = cv2.resize(img, (new_w, new_h))
+    return img
 
 
 def smooth_x_s_info_lst(x_s_info_list, ignore_keys=(), smo_k=13):
@@ -58,13 +86,15 @@ class AvatarRegistrar:
             appearance_extractor_cfg,
             motion_extractor_cfg,
         )
+        self.cache_dir = "cache/avatar_registrar"
+        os.makedirs(self.cache_dir, exist_ok=True)
 
     def register(
-        self,
-        source_path,  # image | video # BYTES  <------------------------------------------------------------------------
-        max_dim=1920,
-        n_frames=-1,
-        **kwargs,
+            self,
+            source_path,  # image | video
+            max_dim=1920,
+            n_frames=-1,
+            **kwargs,
     ):
         """
         kwargs:
@@ -73,31 +103,67 @@ class AvatarRegistrar:
             crop_vy_ratio: -0.125
             crop_flag_do_rot: True
         """
-        rgb_list, is_image_flag = load_source_frames(source_path, max_dim=max_dim, n_frames=n_frames)  # Загрузка картинки в rgb_list и флаг =True поум
+
+        # Will be filled progressively while streaming frames
         source_info = {
             "x_s_info_lst": [],
             "f_s_lst": [],
             "M_c2o_lst": [],
             "eye_open_lst": [],
             "eye_ball_lst": [],
+            "img_rgb_lst": [],
         }
         keys = ["x_s_info", "f_s", "M_c2o", "eye_open", "eye_ball"]
         last_lmk = None
-        for rgb in rgb_list:
-            info = self.source2info(rgb, last_lmk, **kwargs)
-            for k in keys:
-                source_info[f"{k}_lst"].append(info[k])
+        # Stream frames sequentially
+        if type(source_path) == bytes:
+            is_image_flag = True
+            rgb = load_image(source_path, max_dim)
+            for rgb in tqdm([rgb], desc='register avatar'):
+                info = self.source2info(rgb, last_lmk, **kwargs)
+                for k in keys:
+                    source_info[f"{k}_lst"].append(info[k])
+                source_info["img_rgb_lst"].append(rgb)
+                last_lmk = info["lmk203"]
 
-            last_lmk = info["lmk203"]
+        elif is_video(source_path):
+            is_image_flag = False
+            reader = imageio.get_reader(source_path, "ffmpeg")
+            new_h, new_w, rsz_flag = None, None, None
+            try:
+                pbar = tqdm(desc='register avatar')
+                for idx, frame_rgb in enumerate(reader):
+                    if n_frames > 0 and idx >= n_frames:
+                        break
+                    if rsz_flag is None:
+                        h, w = frame_rgb.shape[:2]
+                        new_h, new_w, rsz_flag = check_resize(h, w, max_dim)
+                    if rsz_flag:
+                        frame_rgb = cv2.resize(frame_rgb, (new_w, new_h))
+
+                    info = self.source2info(frame_rgb, last_lmk, **kwargs)
+
+                    info['f_s'] = torch.from_numpy(info['f_s'].astype(np.float16))
+                    for k in keys:
+                        source_info[f"{k}_lst"].append(info[k])
+                    # source_info["img_rgb_lst"].append(frame_rgb)
+                    last_lmk = info["lmk203"]
+                    pbar.update()
+                pbar.close()
+            finally:
+                try:
+                    reader.close()
+                except Exception:
+                    pass
+        else:
+            raise ValueError(f"Unsupported source type: {source_path}")
 
         sc_f0 = source_info['x_s_info_lst'][0]['kp'].flatten()
 
         source_info["sc"] = sc_f0
         source_info["is_image_flag"] = is_image_flag
-        source_info["img_rgb_lst"] = rgb_list
 
         return source_info
-    
+
     def __call__(self, *args, **kwargs):
         return self.register(*args, **kwargs)
-    

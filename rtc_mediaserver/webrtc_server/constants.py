@@ -88,8 +88,12 @@ USER_EVENTS = asyncio.Queue()
 INTERRUPT_CALLED = asyncio.Event()
 ANIMATION_CALLED = asyncio.Event()
 EMOTION_CALLED = asyncio.Event()
+SYNTHESIZE_IN_PROGRESS = asyncio.Event()
+SYNTHESIZE_LOCK = asyncio.Lock()
 
 COMMANDS_QUEUE = asyncio.Queue()
+
+SENTENCES_QUEUE = asyncio.Queue()
 
 class State:
     def __init__(self):
@@ -110,20 +114,24 @@ class State:
                 except:
                     logging.error("Error cancel streamer_task")
 
-        while True:
-            try:
-                SYNC_QUEUE_SEM.release()
-            except ValueError as e:
-                break
+        # while True:
+        #     try:
+        #         SYNC_QUEUE_SEM.release()
+        #     except ValueError as e:
+        #         break
 
         while not SYNC_QUEUE.empty():
             try:
-                AUDIO_SECOND_QUEUE.get_nowait()
-                AUDIO_SECOND_QUEUE.task_done()
                 SYNC_QUEUE.get_nowait()
                 SYNC_QUEUE.task_done()
             except Exception:  # noqa: BLE001
                 break
 
+        while not AUDIO_SECOND_QUEUE.empty():
+            try:
+                AUDIO_SECOND_QUEUE.get_nowait()
+                AUDIO_SECOND_QUEUE.task_done()
+            except Exception:  # noqa: BLE001
+                break
 
 STATE = State()

@@ -19,9 +19,9 @@ def setup_logging(
         format_string: Custom format string for log messages
         log_file: Optional file path for logging to file
     """
-    # Default format if not provided
+    # Default format if not provided - включаем информацию о потоке
     if format_string is None:
-        format_string = '%(asctime)s.%(msecs)03d - %(levelname)s - %(filename)s:%(funcName)s:%(lineno)d - %(message)s'
+        format_string = '%(asctime)s.%(msecs)03d - %(threadName)s - %(levelname)s - %(filename)s:%(funcName)s:%(lineno)d - %(message)s'
     
     # Configure root logger
     logging.basicConfig(
@@ -83,5 +83,5 @@ def setup_default_logging() -> None:
     """Setup default logging configuration."""
     setup_logging(
         level="DEBUG",
-        format_string='%(asctime)s - %(levelname)s - %(filename)s:%(funcName)s:%(lineno)d - %(message)s'
+        format_string='%(asctime)s - %(threadName)s - %(levelname)s - %(filename)s:%(funcName)s:%(lineno)d - %(message)s'
     ) 

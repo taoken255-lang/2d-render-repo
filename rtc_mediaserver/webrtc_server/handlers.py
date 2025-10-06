@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import base64
 import logging
 import uuid
@@ -8,33 +7,18 @@ from typing import Any, Dict
 
 import numpy as np  # type: ignore
 
-from .constants import AUDIO_SETTINGS, CAN_SEND_FRAMES, USER_EVENTS, INTERRUPT_CALLED, CLIENT_COMMANDS, AVATAR_SET, \
-    ANIMATION_CALLED, EMOTION_CALLED, INIT_DONE, COMMANDS_QUEUE, STATE
+from .client_state import ClientState
+from .constants import AUDIO_SETTINGS, INTERRUPT_CALLED, AVATAR_SET, \
+    INIT_DONE, COMMANDS_QUEUE, STATE, SYNTHESIZE_IN_PROGRESS, SYNTHESIZE_LOCK, SENTENCES_QUEUE
 from .info import info
 from .shared import AUDIO_SECOND_QUEUE
 from .tools import fit_chunk
+from .tts.elevenlabs import synthesize
+from .util import _flush_pcm_buf
 from ..events import ServiceEvents
 
 logger = logging.getLogger(__name__)
 
-class ClientState:
-    """Per-connection state kept between websocket messages."""
-
-    def __init__(self) -> None:
-        # Raw PCM bytes buffer (mono int16 little-endian)
-        self.pcm_buf = bytearray()
-        # Chosen sample rate from the init message
-        self.sample_rate: int = AUDIO_SETTINGS.sample_rate
-        # Avatar identifier (not used yet)
-        self.avatar_id: str | None = None
-        # Session identifier (generated on init)
-        self.session_id: str | None = None
-
-    # Helper -----------------------------------------------------------
-    def _bytes_per_chunk(self) -> int:
-        """Return bytes in one configured audio chunk."""
-        from .constants import AUDIO_SETTINGS
-        return AUDIO_SETTINGS.samples_per_chunk * 2
 
 
 # ────────────────────────── Handlers ────────────────────────────
@@ -60,20 +44,6 @@ async def handle_init(message: Dict[str, Any], state: ClientState) -> Dict[str, 
     logger.info("Client init: sampleRate=%d, avatarId=%s, sessionId=%s", sample_rate, state.avatar_id, state.session_id)
     INIT_DONE.set()
     return {"type": "ready", "sessionId": state.session_id}
-
-
-async def _flush_pcm_buf(state: ClientState) -> None:
-    """Push accumulated PCM data to AUDIO_SECOND_QUEUE as 1-sec chunks."""
-    bps = state._bytes_per_chunk()
-    logger.info(f"bps = {bps}")
-    pcm_buf = state.pcm_buf
-    while len(pcm_buf) >= bps:
-        sec_bytes = pcm_buf[:bps]
-        del pcm_buf[:bps]
-        arr = np.frombuffer(sec_bytes, dtype=np.int16)
-        AUDIO_SECOND_QUEUE.put_nowait((arr, state.sample_rate))
-        logger.info("Queued X-second audio chunk (%d samples)", arr.shape[0])
-
 
 async def handle_audio(message: Dict[str, Any], state: ClientState) -> dict:
     """Handle incoming raw audio chunk encoded in base64."""
@@ -121,6 +91,31 @@ async def handle_audio(message: Dict[str, Any], state: ClientState) -> dict:
         AUDIO_SECOND_QUEUE.put_nowait((arr, state.sample_rate))
         logger.info("Queued tail audio chunk (%d samples)", arr.shape[0])
 
+async def handle_synthesize_speech(message: Dict[str, Any], state: ClientState) -> dict:
+    """Handle incoming raw audio chunk encoded in base64."""
+    if not INIT_DONE.is_set():
+        return {
+          "type": "error",
+          "code": "NOT_CONNECTED",
+          "message": "Method `connect` should be called first."
+        }
+    if not AVATAR_SET.is_set():
+        return {
+            "type": "error",
+            "code": "AVATAR_IS_NOT_SET",
+            "message": "Avatar is not set."
+        }
+    text: str = message.get("text", "")
+
+    if not text:
+        logger.warning("handle_synthesize_speech received empty text")
+        return {
+            "type": "error",
+            "code": "UNKNOWN_ERROR",
+            "message": "Unknown error occured."
+        }
+    SENTENCES_QUEUE.put_nowait((text, state))
+
 
 async def handle_set_avatar(message: Dict[str, Any], state: ClientState) -> dict | None:
     avatar_id = message.get("avatarId", None)
@@ -147,7 +142,6 @@ async def handle_set_avatar(message: Dict[str, Any], state: ClientState) -> dict
     logger.info("AVATAR_SET.set()")
     STATE.avatar = avatar_id
     AVATAR_SET.set()
-
 
 async def handle_play_animation(message: Dict[str, Any], state: ClientState) -> dict:
     if not INIT_DONE.is_set():
@@ -236,8 +230,6 @@ async def handle_set_panel_state(message: Dict[str, Any], state: ClientState) ->
         }
     logger.info("Set panel state")
 
-
-
 async def handle_interrupt(message: Dict[str, Any], state: ClientState) -> dict:
     """Clear audio queue and local buffers."""
     if not INIT_DONE.is_set():
@@ -263,7 +255,6 @@ async def handle_interrupt(message: Dict[str, Any], state: ClientState) -> dict:
             break
     logger.info("Audio queue interrupted and cleared")
 
-
 # Map message type → handler coroutine
 HANDLERS: Dict[str, Any] = {
     "connect": handle_init,
@@ -273,4 +264,5 @@ HANDLERS: Dict[str, Any] = {
     "setPanelState": handle_set_panel_state,
     "setEmotion": handle_set_emotion,
     "interrupt": handle_interrupt,
+    "synthesizeSpeech": handle_synthesize_speech
 }

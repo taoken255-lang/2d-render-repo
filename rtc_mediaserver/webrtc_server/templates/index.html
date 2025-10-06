@@ -57,6 +57,7 @@
         background: #bfbfbf;
         cursor: not-allowed;
     }
+
     button:disabled:hover {
         background: #bfbfbf;
     }
@@ -134,6 +135,12 @@
         <button id="setEmotionBtn" onclick="sendSetEmotion()" disabled>Set Emotion (id=default)</button>
     </div>
 
+    <div style="margin-top: 15px;">
+        <label for="speechText">Text to Synthesize:</label>
+        <input type="text" id="speechText" placeholder="Enter text to synthesize..." style="width: 300px;">
+        <button id="synthesizeSpeechBtn" onclick="sendSynthesizeSpeech()" disabled>Synthesize Speech</button>
+    </div>
+
     <div id="status" class="status">Idle</div>
 
     <div id="log" class="log"></div>
@@ -155,7 +162,7 @@ const addLog = msg => {
     log.scrollTop = log.scrollHeight;
 };
 
-function setBtns({ws = null, rtc = null, init = null, audio = null, interrupt = null, avatar = null, animation = null, emotion = null}) {
+function setBtns({ws = null, rtc = null, init = null, audio = null, interrupt = null, avatar = null, animation = null, emotion = null, synthesize = null}) {
     if (ws !== null) S('wsBtn').disabled = ws;
     if (rtc !== null) S('rtcBtn').disabled = rtc;
     if (init !== null) S('initBtn').disabled = init;
@@ -164,6 +171,7 @@ function setBtns({ws = null, rtc = null, init = null, audio = null, interrupt = 
     if (avatar !== null) S('setAvatarBtn').disabled = avatar;
     if (animation !== null) S('playAnimationBtn').disabled = animation;
     if (emotion !== null) S('setEmotionBtn').disabled = emotion;
+    if (synthesize !== null) S('synthesizeSpeechBtn').disabled = synthesize;
 }
 
 const status = (txt, err = false) => {
@@ -278,7 +286,7 @@ function onAvatarChange() {
 
 window.addEventListener('DOMContentLoaded', () => {
     // At start WS not connected, WebRTC may be established any time
-    setBtns({ws: false, rtc: false, init: true, audio: true, interrupt: true, avatar: true, emotion: true, animation: true});
+    setBtns({ws: false, rtc: false, init: true, audio: true, interrupt: true, avatar: true, emotion: true, animation: true, synthesize: true});
     // Load info data and populate selects
     loadInfoData();
 });
@@ -294,7 +302,7 @@ function connectWS() {
         const msg = JSON.parse(ev.data);
         if (msg.type === 'ready') {
             status('Session ready: ' + msg.sessionId);
-            setBtns({init: true, audio: false, interrupt: false, avatar: false, emotion: false, animation: false});
+            setBtns({init: true, audio: false, interrupt: false, avatar: false, emotion: false, animation: false, synthesize: false});
         } else if (msg.type === 'error') {
             status(`Error: ${msg.message}`, true);
         } else {
@@ -308,7 +316,7 @@ function connectWS() {
     ws.onclose = () => {
         status('WS closed');
         // Reset to initial: allow reconnect WS and WebRTC
-        setBtns({ws: false, rtc: false, init: true, audio: true, interrupt: true, avatar: true, emotion: true, animation: true});
+        setBtns({ws: false, rtc: false, init: true, audio: true, interrupt: true, avatar: true, emotion: true, animation: true, synthesize: true});
     };
 }
 
@@ -485,6 +493,20 @@ function sendSetEmotion() {
     status('setEmotion sent');
     addLog('setEmotion sent');
     // keep audio button enabled to continue? Up to spec keep enabled
+}
+
+function sendSynthesizeSpeech() {
+    const textInput = document.getElementById('speechText');
+    const text = textInput.value.trim();
+    if (!text) {
+        alert('Please enter text to synthesize');
+        return;
+    }
+    ws.send(JSON.stringify({type: 'synthesizeSpeech', text: text}));
+    status('SynthesizeSpeech sent');
+    addLog(`SynthesizeSpeech sent: "${text}"`);
+    // Clear input after sending
+    textInput.value = '';
 }
 
 </script>

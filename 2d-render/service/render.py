@@ -86,6 +86,8 @@ class RenderService:
 		        "A2M_MAX_SIZE": int(Config.A2M_MAX_SIZE)}
 		logger.info(ditto_config)
 		args.update(ditto_config)
+		if sts == 5:
+			args["sampling_timesteps"] = 5
 
 		self.sdk.setup(source_path=video_path, output_path="", **args)
 
@@ -107,7 +109,7 @@ class RenderService:
 			aud_feat = self.sdk.wav2feat.wav2feat(self.audio_buffer)
 			self.sdk.audio2motion_queue.put(aud_feat)
 
-	def render_chunk_online(self, audio_chunk, frame_rate: int, is_last: bool, is_voice: bool = False):
+	def render_chunk_online(self, audio_chunk, frame_rate: int, is_last: bool, is_voice: bool = True):
 		logger.debug("START CHUNK RENDER")
 		if not is_last:
 			logger.debug("IS NOT LAST")

@@ -187,6 +187,7 @@ def stream_frames_thread(render, video_queue, height, width, start_time, request
 			if isinstance(frame, EventObject):
 				video_queue.put(frame)
 				continue
+			logger.info(f"GOT IMAGE {width}x{height}, {len(frame)}")
 			video_queue.put(ImageObject(data=frame, height=height, width=width))
 		# dt_start_time = dt_cur_time
 		# dt_first_chunk_flag = True
@@ -232,10 +233,10 @@ def start_render_process(audio_queue, video_queue, start_time, sampling_timestam
 				img_height = img_chunk.height
 				img_width = img_chunk.width
 				img_data = img_chunk.data
-				if img_width % 2 != 0 or img_height % 2 != 0:
-					video_queue.put(ErrorObject(error_type="image",
-					                            error_message=f"Size must be even, got {img_width}x{img_height}"))
-					continue
+				if img_height % 2 != 0:
+					img_height -= 1
+				if img_width % 2 != 0:
+					img_width -= 1
 				render.handle_image(image_chunk=img_data)
 
 				logger.info("START STREAMING THREAD")
@@ -292,8 +293,6 @@ def start_render_process(audio_queue, video_queue, start_time, sampling_timestam
 
 				elif chunk.data.command_type == CommandDataType.PlayAnimation:
 					animation_name = chunk.data.command_data
-					logger.info(animation_name)
-					logger.info(get_avatars())
 					if animation_name not in get_avatars()[avatar_name]["animations"]:
 						video_queue.put(ErrorObject(error_type="animation",
 						                            error_message=f"Animation {animation_name} for avatar {avatar_name} does not exist"))
@@ -436,6 +435,15 @@ def get_mqueue_thread(from_queue, to_queue, is_alpha, output_format, alpha_servi
 							width=frame.width,
 							height=frame.height
 						)
+					elif output_format.get() == "RGBA":
+						alpha = np.full((frame.height, frame.width, 1), 255, dtype=np.uint8)
+						rgba = np.concatenate((rgb, alpha), axis=2)
+						rgba_bytes = rgba.tobytes()
+						frame = ImageObject(
+							data=rgba_bytes,
+							width=frame.width,
+							height=frame.height
+						)
 					else:
 						rgb_bytes = rgb.tobytes()
 						frame = ImageObject(
@@ -558,6 +566,7 @@ class StreamingService(render_service_pb2_grpc.RenderServiceServicer):
 							avatar_set=AvatarSet(avatar_id=avatar_sent_mem.event_data["avatar_id"]))
 						logger.info(f"SENT AVATAR SET EVENT")
 						avatar_sent_mem = None
+					logger.info(f"{frame.width}x{frame.height}, {len(frame.data)}")
 					yield RenderResponse(video=VideoChunk(data=frame.data, width=frame.width, height=frame.height))
 					logger.info(f"SENT")
 				# logger.info(f"END GRPC YIELDING {chunk_counter}")

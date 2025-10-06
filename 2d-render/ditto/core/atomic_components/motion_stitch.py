@@ -67,7 +67,18 @@ def ctrl_vad(x_d_info, dst, alpha):
     x_d_info["exp"] = exp * alpha + exp_dst * (1 - alpha)
 
     return x_d_info
-    
+
+
+def ctrl_vad_overwrite(x_d_info, dst, alpha):
+    exp = x_d_info["exp"]
+    exp_dst = dst["exp"]
+    x_d_info["exp"] = exp * alpha + exp_dst * (1 - alpha)
+    x_d_info["pitch"] = x_d_info["pitch"] * alpha + dst["pitch"] * (1 - alpha)
+    x_d_info["yaw"] = x_d_info["yaw"] * alpha + dst["yaw"] * (1 - alpha)
+    x_d_info["roll"] = x_d_info["roll"] * alpha + dst["roll"] * (1 - alpha)
+    x_d_info["t"] = x_d_info["t"] * alpha + dst["t"] * (1 - alpha)
+
+    return x_d_info
     
 
 def _mix_s_d_info(
@@ -314,6 +325,7 @@ class MotionStitch:
         d0=None,
         ch_info=None,
         overall_ctrl_info=None,
+        fix_exp_a1_alpha=None,
     ):
         self.is_image_flag = is_image_flag
         if use_d_keys is None:
@@ -353,8 +365,10 @@ class MotionStitch:
                 _a2[_eye] = 1
                 _a2 = _a2.reshape(1, -1)
         _a1 = _a1.reshape(1, -1)
-
-        self.fix_exp_a1 = _a1 * (1 - _a2)
+        if fix_exp_a1_alpha is not None:
+            self.fix_exp_a1 = _a1 * (1 - fix_exp_a1_alpha)
+        else:
+            self.fix_exp_a1 = _a1 * (1 - _a2)
         self.fix_exp_a2 = (1 - _a1) + _a1 * _a2
         self.fix_exp_a3 = _a2
 
@@ -453,7 +467,7 @@ class MotionStitch:
 
         current_silence = not kwargs.get("is_voice", True)
         silence_threshold = kwargs.get("silence_threshold", 5)  # Порог кадров (по умолчанию 50 = 2 секунды)
-        silence_alpha = kwargs.get("silence_alpha", 0.1)  # Коэффициент ослабления (по умолчанию 0.1)
+        silence_alpha = kwargs.get("silence_alpha", 0.0)  # Коэффициент ослабления (по умолчанию 0.1)
         transition_frames = kwargs.get("silence_transition_frames",
                                        10)  # Кадры для плавного перехода (по умолчанию 10 = 400ms)
 
@@ -479,7 +493,7 @@ class MotionStitch:
 
         # Применяем ослабление если альфа меньше 1.0
         if self._current_alpha < 1.0:
-            x_d_info = ctrl_vad(x_d_info, x_s_info, self._current_alpha)
+            x_d_info = ctrl_vad_overwrite(x_d_info, x_s_info, self._current_alpha)
 
         x_d_info = ctrl_motion(x_d_info, **kwargs)
 
@@ -525,4 +539,4 @@ class MotionStitch:
 
         self.idx += 1
 
-        return x_s, x_d
+        return x_s, x_d, self._current_alpha == 0

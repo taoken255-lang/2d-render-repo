@@ -11,7 +11,7 @@ import numpy as np
 
 def video_request(audio_file):
 	with wave.open(audio_file, 'rb') as wf:
-		yield RenderRequest(set_avatar=SetAvatar(avatar_id="ermakova_test"), online=True, alpha=False, output_format="RGB")
+		yield RenderRequest(set_avatar=SetAvatar(avatar_id="ermakova"), online=True, alpha=False, output_format="RGB")
 		logger.info("AVATAR SENT")
 
 		sample_rate = wf.getframerate()
@@ -31,7 +31,9 @@ def video_request(audio_file):
 			# 	yield RenderRequest(play_animation=PlayAnimation(animation="idle3"))
 			# 	yield RenderRequest(play_animation=PlayAnimation(animation="idle3"))
 			# 	yield RenderRequest(play_animation=PlayAnimation(animation="idle3"))
-				# yield RenderRequest(play_animation=PlayAnimation(animation="point_suit"))
+			# 	yield RenderRequest(play_animation=PlayAnimation(animation="Idle_Drinking"))
+			# 	yield RenderRequest(play_animation=PlayAnimation(animation="Idle_Drinking"))
+			# 	yield RenderRequest(play_animation=PlayAnimation(animation="Idle_Drinking"))
 				# yield RenderRequest(set_emotion=SetEmotion(emotion="angry"))
 				# logger.info("EMOTION SENT")
 				# yield RenderRequest(play_animation=PlayAnimation(animation="point_suit"))
@@ -201,11 +203,11 @@ if __name__ == '__main__':
 	"""
 
 	url = "2d-dev.digitalavatars.ru"
-	aud_file = "tools/client/res/ermakova_test.wav"
-	img_file = "tools/client/res/img3.png"
-	port = "8501"
+	aud_file = "tools/client/res/blue_woman_3.2.wav"
+	img_file = "tools/client/res/test1.png"
+	port = "8500"
 	# info(url)
-	local_video_run(aud_file, port)
+	# local_video_run(aud_file, port)
 	# video_run(aud_file, url)
 	# local_image_run(aud_file, img_file, port)
-	# image_run(aud_file, img_file, url)
+	image_run(aud_file, img_file, url)

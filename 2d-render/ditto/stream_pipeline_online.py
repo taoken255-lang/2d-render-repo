@@ -1,12 +1,21 @@
+import asyncio
+import os
+import pickle
 import threading
 import queue
-
 import numpy as np
+import time
+import random
 import traceback
+import json
+import cv2
+import datetime
+
+from threading import Lock
 from tqdm import tqdm
 from loguru import logger
-import time
-import json
+import torch
+from pathlib import Path
 
 from ditto.core.atomic_components.avatar_registrar import AvatarRegistrar, smooth_x_s_info_lst
 from ditto.core.atomic_components.condition_handler import ConditionHandler, _mirror_index
@@ -16,6 +25,7 @@ from ditto.core.atomic_components.warp_f3d import WarpF3D
 from ditto.core.atomic_components.decode_f3d import DecodeF3D
 from ditto.core.atomic_components.putback import PutBack
 from ditto.core.atomic_components.writer import VideoWriterByImageIO
+from ditto.core.atomic_components.video_frame_extractor import SequentialPyAVFrameExtractor
 from ditto.core.atomic_components.wav2feat import Wav2Feat
 from ditto.core.atomic_components.cfg import parse_cfg, print_cfg
 
@@ -116,6 +126,8 @@ class StreamSDK:
         self.putback = PutBack()
 
         self.wav2feat = Wav2Feat(**wav2feat_cfg)
+
+        self.seq_video_extractor = SequentialPyAVFrameExtractor()
 
     def add_video_segment(self, video_segment_name: str):
         """
@@ -234,7 +246,6 @@ class StreamSDK:
 
         # only hubert support online mode
         assert self.wav2feat.support_streaming or not self.online_mode
-
         # ======== Register Avatar ========
         crop_kwargs = {
             "crop_scale": self.crop_scale,
@@ -244,12 +255,35 @@ class StreamSDK:
         }
         n_frames = self.template_n_frames if self.template_n_frames > 0 else self.N_d  # ? -1 картинка, больше - видос
         # logger.info(f"source_path: {source_path}")
-        source_info = self.avatar_registrar(
-            source_path,
-            max_dim=self.max_size,
-            n_frames=n_frames,
-            **crop_kwargs,
-        )
+        if type(source_path) == bytes:
+            source_info = self.avatar_registrar(
+                source_path,
+                max_dim=self.max_size,
+                n_frames=n_frames,
+                **crop_kwargs,
+            )
+        else:
+            if kwargs.get("preprocess", False):
+                source_info = self.avatar_registrar(
+                    source_path,
+                    max_dim=self.max_size,
+                    n_frames=n_frames,
+                    **crop_kwargs,
+                )
+                with open(Path(source_path).with_suffix(".pickle"), 'wb') as f:
+                    pickle.dump(source_info, f)
+                return
+            else:
+                if os.path.isfile(Path(source_path).with_suffix(".pickle")):
+                    with open(Path(source_path).with_suffix(".pickle"), 'rb') as f:
+                        source_info = pickle.load(f)
+                else:
+                    source_info = self.avatar_registrar(
+                        source_path,
+                        max_dim=self.max_size,
+                        n_frames=n_frames,
+                        **crop_kwargs,
+                    )
 
         if len(source_info["x_s_info_lst"]) > 1 and self.smo_k_s > 1:
             source_info["x_s_info_lst"] = smooth_x_s_info_lst(source_info["x_s_info_lst"], smo_k=self.smo_k_s)
@@ -276,6 +310,7 @@ class StreamSDK:
         # ======== Setup Motion Stitch ========
         is_image_flag = source_info["is_image_flag"]
         x_s_info = source_info['x_s_info_lst'][0]
+        fix_exp_a1_alpha = kwargs.get("fix_exp_a1_alpha", None)
         self.motion_stitch.setup(
             N_d=self.N_d,
             use_d_keys=self.use_d_keys,
@@ -291,6 +326,7 @@ class StreamSDK:
             d0=None,
             ch_info=self.ch_info,
             overall_ctrl_info=self.overall_ctrl_info,
+            fix_exp_a1_alpha=fix_exp_a1_alpha
         )
 
         # ======== Video Writer ========
@@ -341,12 +377,13 @@ class StreamSDK:
         video_segments_path = kwargs.get("video_segments_path", None)
         self.video_exists = False
         if video_segments_path:
+            self.seq_video_extractor._initialize_video(source_path)
             self.video_exists = True
             self.setup_video_segments(video_segments_path)
 
         emotions_info_path = kwargs.get("emotions_path", None)
         self.emotion_exists = False
-        if emotions_info_path:
+        if emotions_info_path and os.path.exists(os.path.join(emotions_info_path, "info.json")):
             self.emotion_exists = True
             self.setup_emotions(kwargs['emotions_path'])
 
@@ -408,7 +445,6 @@ class StreamSDK:
             with open(video_segments_path, 'r') as fp:
                 self.video_segment_info = json.load(fp)
 
-        self.video_segment_info = self.video_segment_info
         self.video_segment_buffer = []
         self.video_segment_current = "idle"
         self.video_segment_auto_idle = True
@@ -416,6 +452,7 @@ class StreamSDK:
 
         # Handle global gen frame index
         self.gen_frame_idx = self.video_segment_info["idle"]["start"]
+        self.seq_video_extractor.seek_to_frame(self.gen_frame_idx)
 
         print(f'loaded video segments {self.video_segment_info}')
 
@@ -473,6 +510,7 @@ class StreamSDK:
         try:
             self._putback_worker()
         except Exception as e:
+            logger.error(f"STREAM_PIPELINE_ONLINE putback_worker: {str(e)}")
             self.worker_exception = e
             self.stop_event.set()
 
@@ -494,8 +532,12 @@ class StreamSDK:
                 self.writer_queue.put(None)
                 # logger.info(pb_res_time_list)
                 break
-            frame_idx, render_img = item
-            frame_rgb = self.source_info["img_rgb_lst"][frame_idx]
+            frame_idx, render_img, frame_pb, is_alpha = item
+            # frame_rgb = self.source_info["img_rgb_lst"][frame_idx]
+            if self.video_exists:
+                frame_rgb = frame_pb
+            else:
+                frame_rgb = self.source_info["img_rgb_lst"][frame_idx]
             M_c2o = self.source_info["M_c2o_lst"][frame_idx]
             res_frame_rgb = self.putback(frame_rgb, render_img, M_c2o)
             self.writer_queue.put(res_frame_rgb)
@@ -505,6 +547,7 @@ class StreamSDK:
         try:
             self._decode_f3d_worker()
         except Exception as e:
+            logger.error(f"STREAM_PIPELINE_ONLINE decode_f3d_worker: {str(e)}")
             self.worker_exception = e
             self.stop_event.set()
 
@@ -526,20 +569,21 @@ class StreamSDK:
                 self.putback_queue.put(None)
                 # logger.info(df3d_res_time_list)
                 break
-            frame_idx, f_3d = item
+            frame_idx, f_3d, frame_pb, is_alpha = item
             # start = time.perf_counter()
             # logger.info("------------------------ DECODOE F3D START ------------------------")
             render_img = self.decode_f3d(f_3d)
             # end = time.perf_counter()
             # logger.info(f"------------------------ DECODOE F3D END {end-start} ------------------------")
             # logger.info("PUTBACK QUEUE PUT")
-            self.putback_queue.put([frame_idx, render_img])
+            self.putback_queue.put([frame_idx, render_img, frame_pb, is_alpha])
             # df3d_res_time_list.append(time.perf_counter() - self.union_start)
 
     def warp_f3d_worker(self):
         try:
             self._warp_f3d_worker()
         except Exception as e:
+            logger.error(f"STREAM_PIPELINE_ONLINE warp_f3d_worker: {str(e)}")
             self.worker_exception = e
             self.stop_event.set()
 
@@ -561,21 +605,24 @@ class StreamSDK:
                 self.decode_f3d_queue.put(None)
                 # logger.info(wf3d_res_time_list)
                 break
-            frame_idx, x_s, x_d = item
+            frame_idx, x_s, x_d, frame_pb, is_alpha = item
             f_s = self.source_info["f_s_lst"][frame_idx]
             # start = time.perf_counter()
             # logger.info("---------------- WARP F3D START ----------------")
+            if self.video_exists:
+                f_s = f_s.to(torch.float32).numpy()
             f_3d = self.warp_f3d(f_s, x_s, x_d)
             # end = time.perf_counter()
             # logger.info(f"---------------- WARP F3D END {end-start} ----------------")
             # logger.info("DECODE F3D QUEUE PUT")
-            self.decode_f3d_queue.put([frame_idx, f_3d])
+            self.decode_f3d_queue.put([frame_idx, f_3d, frame_pb, is_alpha])
             # wf3d_res_time_list.append(time.perf_counter() - self.union_start)
 
     def motion_stitch_worker(self):
         try:
             self._motion_stitch_worker()
         except Exception as e:
+            logger.error(f"STREAM_PIPELINE_ONLINE motion_stitch_worker: {str(e)}")
             self.worker_exception = e
             self.stop_event.set()
 
@@ -603,11 +650,14 @@ class StreamSDK:
             item, is_voice = item
             # Короче x_s - Motion Extractor, f_s - Appearance Extractor
 
-            frame_idx, x_d_info, ctrl_kwargs = item  # Получаем данные из audio2motion (x_d_info - кадр-кейпоинт)
-            ctrl_kwargs['is_voice'] = is_voice
+            frame_idx, x_d_info, ctrl_kwargs, frame_pb, vad = item  # Получаем данные из audio2motion (x_d_info - кадр-кейпоинт)
+            if self.video_exists:
+                ctrl_kwargs['is_voice'] = is_voice
+                if vad:
+                    ctrl_kwargs["is_voice"] = False
             x_s_info = self.source_info["x_s_info_lst"][frame_idx]  # Данные по картинке - ? motion extractor по кадру (? кадр 1 для картинки
             if not self.emotion_exists:
-                x_s, x_d = self.motion_stitch(x_s_info, x_d_info, **ctrl_kwargs)
+                x_s, x_d, is_alpha = self.motion_stitch(x_s_info, x_d_info, **ctrl_kwargs)
             else:
                 # start = time.perf_counter()
                 # logger.info("-------- MOTION STITCH START --------")
@@ -643,18 +693,19 @@ class StreamSDK:
                     x_exp_emo = 0
 
                 # -------------------------------------------------------
-                x_s, x_d = self.motion_stitch(x_s_info, x_d_info, x_exp_emo=x_exp_emo, **ctrl_kwargs)
+                x_s, x_d, is_alpha = self.motion_stitch(x_s_info, x_d_info, x_exp_emo=x_exp_emo, **ctrl_kwargs)
 
             # end = time.perf_counter()
             # logger.info(f"-------- MOTION STITCH END {end-start} --------")
             # logger.info("WARP F3D QUEUE PUT")
-            self.warp_f3d_queue.put([frame_idx, x_s, x_d])
+            self.warp_f3d_queue.put([frame_idx, x_s, x_d, frame_pb, is_alpha])
             # ms_res_time_list.append(time.perf_counter() - self.union_start)
 
     def audio2motion_worker(self):
         try:
             self._audio2motion_worker()
         except Exception as e:
+            logger.error(f"STREAM_PIPELINE_ONLINE audio2motion_worker: {str(e)}")
             self.worker_exception = e
             self.stop_event.set()
 
@@ -673,6 +724,7 @@ class StreamSDK:
         gen_frame_idx = 0
         # a2m_res_time_list = []
         # first_flag = True
+        vad = False
         while not self.stop_event.is_set():
             try:
                 item = self.audio2motion_queue.get(timeout=1)  # audio feat
@@ -727,7 +779,6 @@ class StreamSDK:
                 else:
                     valid_res_kp_seq = res_kp_seq[:, res_kp_seq_valid_start: res_kp_seq_valid_start + real_valid_len]  # ? Кадры-кейпоинты не из области слияния
                     x_d_info_list = self.audio2motion.cvt_fmt(valid_res_kp_seq)  # Список кадров-кейпоинтов формата [{np[]}, ...]
-
                     for x_d_info in x_d_info_list:
                         if self.video_exists:
                         # ------------------- Manage Video Segments -------------------
@@ -739,12 +790,20 @@ class StreamSDK:
                                     self.video_segment_current = new_video_segment[0]
                                     self.video_segment_auto_idle = new_video_segment[1]
                                     self.gen_frame_idx = self.video_segment_info[self.video_segment_current]["start"]
+                                    if "vad" in self.video_segment_info[self.video_segment_current]:
+                                        vad = self.video_segment_info[self.video_segment_current]["vad"]
+                                        logger.info(f"ASSIGN VAD {vad} TO {self.video_segment_current}")
+                                    else:
+                                        vad = False
+                                    self.seq_video_extractor.seek_to_frame(self.gen_frame_idx)
                                 else:
                                     if self.video_segment_auto_idle:
                                         self.video_segment_current = "idle"  # тест анимация за анимацией
                                         logger.info(f"SWITCH TO IDLE CAUSE AUTO IDLE {self.video_segment_auto_idle}")
                                     self.gen_frame_idx = self.video_segment_info[self.video_segment_current]["start"]
-
+                                    self.seq_video_extractor.seek_to_frame(self.gen_frame_idx)
+                                    vad = False
+                            frame_pb = self.seq_video_extractor.get_next_frame()
                             frame_idx = _mirror_index(
                                 self.gen_frame_idx,
                                 self.video_segment_info[self.video_segment_current]["end"])
@@ -755,7 +814,8 @@ class StreamSDK:
                             ctrl_kwargs = {}
                         # -------------------------------------------------------------
                         else:
-
+                            frame_pb = None
+                            vad = False
                             frame_idx = _mirror_index(gen_frame_idx, self.source_info_frames)  # ? Индекс кадра
                             ctrl_kwargs = self._get_ctrl_info(gen_frame_idx)  # ? Управляющие параметры
 
@@ -765,7 +825,6 @@ class StreamSDK:
                                     if self.video_segment_current != self.video_segment_previous:
                                         # logger.info(self.video_segment_previous)
                                         # logger.info(self.video_segment_current)
-                                        # logger.info(is_voice)
                                         if self.video_segment_previous == "":
                                             self.motion_stitch_queue.put(EventObject(event_name="animation", event_data={
                                                 "name": self.video_segment_current,
@@ -780,8 +839,7 @@ class StreamSDK:
                                                 "name": self.video_segment_current,
                                                 "event": 1
                                             }))
-
-                                self.motion_stitch_queue.put(([frame_idx, x_d_info, ctrl_kwargs], is_voice))  # Кладем в очередь обработчика
+                                self.motion_stitch_queue.put(([frame_idx, x_d_info, ctrl_kwargs, frame_pb, vad], is_voice))  # Кладем в очередь обработчика
                                 if self.video_exists:
                                     self.video_segment_previous = self.video_segment_current
                                 break
@@ -829,6 +887,7 @@ class StreamSDK:
         # Wait for worker threads to finish
         for thread in self.thread_list:
             thread.join()
+        self.seq_video_extractor.close()
         logger.info("PROCESSES CLOSED")
 
         # try:
@@ -840,7 +899,7 @@ class StreamSDK:
         if self.worker_exception is not None:
             raise self.worker_exception
 
-    def run_chunk(self, audio_chunk, chunksize=(3, 5, 2), is_voice: bool = False):
+    def run_chunk(self, audio_chunk, chunksize=(3, 5, 2), is_voice: bool = True):
         # only for hubert
         # is_voice = False
         # audio_chunk = np.zeros_like(audio_chunk)
@@ -857,6 +916,3 @@ class StreamSDK:
                     break
                 except queue.Full:
                     continue
-
-
-

@@ -15,7 +15,7 @@ from PIL import Image
 
 from rtc_mediaserver.logging_config import get_logger, setup_default_logging
 from .constants import DEFAULT_IMAGE_PATH, AUDIO_SETTINGS, CAN_SEND_FRAMES, \
-    FRAMES_PER_CHUNK, USER_EVENTS, INTERRUPT_CALLED, COMMANDS_QUEUE, STATE
+    FRAMES_PER_CHUNK, USER_EVENTS, INTERRUPT_CALLED, COMMANDS_QUEUE, STATE, SYNTHESIZE_IN_PROGRESS
 from .shared import AUDIO_SECOND_QUEUE, SYNC_QUEUE, SYNC_QUEUE_SEM
 from ..config import settings
 from ..events import ServiceEvents, Conditions
@@ -98,7 +98,7 @@ async def stream_worker_aio() -> None:
             event = None
             is_speech = True
             if AUDIO_SECOND_QUEUE.qsize() > 0:
-                logger.info(f"{AUDIO_SECOND_QUEUE.qsize()}")
+                logger.info(f"AUDIO_SECOND_QUEUE.qsize={AUDIO_SECOND_QUEUE.qsize()}")
                 audio_sec, sr = AUDIO_SECOND_QUEUE.get_nowait()
 
                 # Подгоняем размер до CHUNK_SAMPLES
@@ -109,7 +109,7 @@ async def stream_worker_aio() -> None:
                 elif n > CHUNK_SAMPLES:
                     audio_sec = audio_sec[:CHUNK_SAMPLES]
 
-                logger.info("Got buffered audio, pending %d", AUDIO_SECOND_QUEUE.qsize())
+                #logger.info("Got buffered audio, pending %d", AUDIO_SECOND_QUEUE.qsize())
                 speech_sended = True
                 is_speech = True
             else:
@@ -118,7 +118,7 @@ async def stream_worker_aio() -> None:
                     event = ServiceEvents.EOS if not INTERRUPT_CALLED.is_set() else ServiceEvents.INTERRUPT
                 # WAV не грузится → отправляем тишину
                 audio_sec, sr = np.zeros(CHUNK_SAMPLES, dtype=np.int16), AUDIO_SETTINGS.sample_rate
-                logger.info("Steady silence – idle state")
+                logger.info("AUDIO_SECOND_QUEUE empty. Steady silence – idle state")
                 is_speech = False
 
             pending_audio.append((audio_sec, sr, event))
@@ -130,7 +130,7 @@ async def stream_worker_aio() -> None:
 
             yield request
 
-            while COMMANDS_QUEUE.qsize() > 0:
+            while COMMANDS_QUEUE.qsize() > 0 and not SYNTHESIZE_IN_PROGRESS.is_set():
                 evt, evt_payload = COMMANDS_QUEUE.get_nowait()
                 if evt == ServiceEvents.SET_ANIMATION:
                     logger.info(f"Request -> Playing animation {evt_payload}")
@@ -160,7 +160,7 @@ async def stream_worker_aio() -> None:
                 logger.info("No clients - exiting receiver")
                 break
             if chunk.WhichOneof("chunk") == "video":
-                logger.info(f"New frame received, {len(frames_batch)}/{FRAMES_PER_CHUNK}")
+                #logger.info(f"New frame received, {len(frames_batch)}/{FRAMES_PER_CHUNK}")
                 frames += 1
                 # больше не используем событие каждые 2 кадра – управляем после минимального буфера кадров
                 img = Image.frombytes("RGB", (chunk.video.width, chunk.video.height), chunk.video.data, "raw")
@@ -190,7 +190,7 @@ async def stream_worker_aio() -> None:
                             USER_EVENTS.put_nowait({"type": "interrupted"})
                             await asyncio.sleep(0)
                             INTERRUPT_CALLED.clear()
-                        await SYNC_QUEUE_SEM.acquire()
+                        #await SYNC_QUEUE_SEM.acquire()
                         SYNC_QUEUE.put((audio_chunk, frames_batch.copy()))
                         logger.info("SYNC_QUEUE +1 (size=%d)", SYNC_QUEUE.qsize())
                     else:
@@ -207,7 +207,7 @@ async def stream_worker_aio() -> None:
                 logger.info(f"END ANIMATION {chunk.end_animation.animation_name}")
                 await asyncio.sleep(0)
             elif chunk.WhichOneof("chunk") == "avatar_set":
-                USER_EVENTS.put_nowait({"type": "avatarSet", "id": chunk.avatar_set.avatar_id})
+                USER_EVENTS.put_nowait({"type": "avatarSet", "avatarId": chunk.avatar_set.avatar_id})
                 logger.info(f"AVATAR SET  {chunk.avatar_set.avatar_id}")
                 await asyncio.sleep(0)
             elif chunk.WhichOneof("chunk") == "emotion_set":
