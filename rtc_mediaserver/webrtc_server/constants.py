@@ -102,6 +102,7 @@ class State:
         self.current_session_id = None
         self.auto_idle: bool = True
         self.current_pc: RTCPeerConnection = None
+        self.chunks_to_skip: int = 0
 
     def kill_streamer(self):
         if self.streamer_task:

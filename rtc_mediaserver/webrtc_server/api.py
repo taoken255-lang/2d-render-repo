@@ -25,7 +25,7 @@ from .grpc_client import stream_worker_forever
 from .player import WebRTCMediaPlayer
 from .handlers import HANDLERS, ClientState
 from .info import info
-from .tts.elevenlabs import synthesize_worker
+from .tts.elevenlabs import synthesize_worker, voices
 from .webrtc_manager import webrtc_manager
 from ..config import settings
 
@@ -326,9 +326,10 @@ async def process_offer(params: Dict[str, Any]) -> Dict[str, Any]:
         "type": pc.localDescription.type,
     }
 
-
 @app.post("/offer")
 async def offer(request: Request):  # type: ignore[override]
+    webrtc_manager.main_loop = asyncio.get_running_loop()
+
     # Check Content-Type header
     content_type = request.headers.get("content-type", "").lower()
     if not content_type.startswith("application/json"):
@@ -401,6 +402,14 @@ async def send_user_event(websocket: WebSocket):
         message = await USER_EVENTS.get()
         logger.info(f"Send event {message}")
         await websocket.send_json(message)
+
+@app.get("/health")
+async def health():
+    try:
+        await voices()
+    except:
+        return Response(status_code=500)
+    return Response(status_code=200)
 
 @app.websocket("/ws")
 async def control_ws(websocket: WebSocket):  # type: ignore[override]

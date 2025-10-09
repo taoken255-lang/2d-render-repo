@@ -53,5 +53,7 @@ class Settings(BaseSettings):
     elevenlabs_voice_speed: float = 1.1
     elevenlabs_type: str = "http"
 
+    bitrate: int = 16_000_000
+
 # Global settings instance
 settings = Settings() 

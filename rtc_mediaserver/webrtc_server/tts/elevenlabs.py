@@ -70,6 +70,26 @@ async def synthesize(
         logger.error(f"Unknown error in elevenlabs: {exc}")
         logger.error(traceback.format_exc())
 
+async def voices():
+    logger.info(f"11labs - check voices")
+    try:
+        url = (f"{settings.elevenlabs_api_url}v2/voices")
+        headers = {
+            "xi-api-key": settings.elevenlabs_api_key,
+            "Content-Type": "application/json"
+        }
+
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers) as resp:
+                if resp.status == 200:
+                    return True
+                else:
+                    message = await resp.text()
+                    raise Exception(message)
+    except BaseException as exc:
+        logger.error(f"Unknown error in elevenlabs (get voices): {exc}")
+        logger.error(traceback.format_exc())
+
 async def synthesize_ws(
         text: str
 ):

@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import glob
 import logging
+import random
 import re
 import time
 import wave
@@ -51,13 +52,10 @@ async def stream_worker_aio() -> None:
 
     # Keep state between iterations
     from collections import deque
-    pending_audio: Deque[Tuple[np.ndarray, int, ServiceEvents | None]] = deque()
+    pending_audio: Deque[Tuple[np.ndarray, int, ServiceEvents | None, bool, bool]] = deque()
     frames_batch: List[np.ndarray] = []
 
     CHUNK_SAMPLES = AUDIO_SETTINGS.samples_per_chunk
-    logger.info(f"CHUNK_SAMPLES = {CHUNK_SAMPLES}")
-    can_send_next: asyncio.Event = asyncio.Event()
-
     chunks_sem = asyncio.Semaphore(settings.max_inflight_chunks)
 
     async def sender_generator():
@@ -95,8 +93,19 @@ async def stream_worker_aio() -> None:
             #     can_send_next.clear()
             #     seconds_inflight -= 1  # один долг погашен
 
+            interrupted = False
+
+            if INTERRUPT_CALLED.is_set():
+                interrupted = True
+                STATE.chunks_to_skip = len(pending_audio)
+                INTERRUPT_CALLED.clear()
+                USER_EVENTS.put_nowait({"type": "interrupted"})
+
+
+
             event = None
             is_speech = True
+            is_interrupt = False
             if AUDIO_SECOND_QUEUE.qsize() > 0:
                 logger.info(f"AUDIO_SECOND_QUEUE.qsize={AUDIO_SECOND_QUEUE.qsize()}")
                 audio_sec, sr = AUDIO_SECOND_QUEUE.get_nowait()
@@ -109,19 +118,19 @@ async def stream_worker_aio() -> None:
                 elif n > CHUNK_SAMPLES:
                     audio_sec = audio_sec[:CHUNK_SAMPLES]
 
-                #logger.info("Got buffered audio, pending %d", AUDIO_SECOND_QUEUE.qsize())
                 speech_sended = True
                 is_speech = True
             else:
                 if speech_sended:
                     speech_sended = False
-                    event = ServiceEvents.EOS if not INTERRUPT_CALLED.is_set() else ServiceEvents.INTERRUPT
+                    event = ServiceEvents.EOS if not interrupted else ServiceEvents.INTERRUPT
                 # WAV не грузится → отправляем тишину
                 audio_sec, sr = np.zeros(CHUNK_SAMPLES, dtype=np.int16), AUDIO_SETTINGS.sample_rate
                 logger.info("AUDIO_SECOND_QUEUE empty. Steady silence – idle state")
                 is_speech = False
 
-            pending_audio.append((audio_sec, sr, event))
+
+            pending_audio.append((audio_sec, sr, event, is_speech, is_interrupt))
 
             request = render_service_pb2.RenderRequest(
                 audio=render_service_pb2.AudioChunk(data=audio_sec.tobytes(), sample_rate=sr, bps=16, is_voice=is_speech),
@@ -162,7 +171,6 @@ async def stream_worker_aio() -> None:
             if chunk.WhichOneof("chunk") == "video":
                 #logger.info(f"New frame received, {len(frames_batch)}/{FRAMES_PER_CHUNK}")
                 frames += 1
-                # больше не используем событие каждые 2 кадра – управляем после минимального буфера кадров
                 img = Image.frombytes("RGB", (chunk.video.width, chunk.video.height), chunk.video.data, "raw")
                 #img.save(f"images/frame_{frames}.png")
                 img_np = np.asarray(
@@ -170,33 +178,47 @@ async def stream_worker_aio() -> None:
                     np.uint8,
                 )
                 frames_batch.append(img_np)
-                # Освобождаем один «токен» на каждый пришедший кадр – предотвращаем стоп при низком FPS
 
                 # Когда набрали минимальный пакет кадров
                 if len(frames_batch) == FRAMES_PER_CHUNK:
+                    logger.info(f"Got 15 frames for {time.time() - t_start}")
+                    chunks_sem.release()
+                    if pending_audio:
+                        audio_chunk, _sr, event, is_speech, is_interrupt = pending_audio.popleft()
+
+                        event_to_send = None
+                        if event and event == ServiceEvents.EOS:
+                            event_to_send = "eos"
+                            USER_EVENTS.put_nowait({"type": event_to_send})
+                            # asyncio.create_task(send_event("eos"))
+                            # await asyncio.sleep(0)
+                        if is_interrupt:
+                            event_to_send = "interrupted"
+                            # asyncio.create_task(send_event("interrupted"))
+                            # INTERRUPT_CALLED.clear()
+                            # await asyncio.sleep(0)
+
+                        if STATE.chunks_to_skip == 0:
+                            SYNC_QUEUE.put((audio_chunk, frames_batch.copy(), event_to_send))
+                        else:
+                            STATE.chunks_to_skip -= 1
+                            logger.info(f"Skipped chunk, remainig {STATE.chunks_to_skip}")
+                            if not STATE.chunks_to_skip and INTERRUPT_CALLED.is_set():
+                                INTERRUPT_CALLED.clear()
+                        logger.info("SYNC_QUEUE +1 (size=%d)", SYNC_QUEUE.qsize())
+                    else:
+                        logger.warning("Render service produced %d frames but no matching audio is pending", FRAMES_PER_CHUNK)
+                    frames_batch.clear()
+
                     t_sleep = (0.6 - (time.time() - t_start)) + 0.040
+
+                    logger.info(f"grpc sleep = {t_sleep}")
 
                     if t_sleep > 0:
                         logger.info(f"Sleep for {t_sleep}")
                         await asyncio.sleep(t_sleep)
                     t_start = time.time()
-                    chunks_sem.release()
-                    if pending_audio:
-                        audio_chunk, _sr, event = pending_audio.popleft()
-                        if event and event == ServiceEvents.EOS:
-                            USER_EVENTS.put_nowait({"type": "eos"})
-                            await asyncio.sleep(0)
-                        elif event and event == ServiceEvents.INTERRUPT:
-                            USER_EVENTS.put_nowait({"type": "interrupted"})
-                            await asyncio.sleep(0)
-                            INTERRUPT_CALLED.clear()
-                        #await SYNC_QUEUE_SEM.acquire()
-                        SYNC_QUEUE.put((audio_chunk, frames_batch.copy()))
-                        logger.info("SYNC_QUEUE +1 (size=%d)", SYNC_QUEUE.qsize())
-                    else:
-                        logger.warning("Render service produced %d frames but no matching audio is pending", FRAMES_PER_CHUNK)
-                    can_send_next.set()  # сообщаем генератору, что можно слать ещё секунду
-                    frames_batch.clear()
+
                     await asyncio.sleep(0)
             elif chunk.WhichOneof("chunk") == "start_animation":
                 USER_EVENTS.put_nowait({"type": "animationStarted", "id": chunk.start_animation.animation_name})
@@ -246,7 +268,6 @@ async def stream_worker_aio() -> None:
 
         logger.info(f"Queues cleared")
 
-        can_send_next.set()
         await channel.close()
 
 def _natural_key(p: str | Path):
@@ -379,13 +400,24 @@ async def stream_worker_forever() -> None:
     Args:
         restart_delay: Seconds to wait before restarting after a crash.
     """
+    retries = 0
+    initial_delay = 5
+    max_delay = 60
+    current_delay = initial_delay
     while True:
         try:
             await Conditions.can_process_frames()
             STATE.streamer_task = asyncio.create_task(stream_worker_aio())
             await STATE.streamer_task
             logger.warning("stream_worker_aio exited normally")
+            retries = 0
+            current_delay = initial_delay
         except BaseException as e:
             logger.exception(f"stream_worker_aio crashed {e!r}")
+            delay = current_delay + random.uniform(0, current_delay * 0.1)
+            logger.info(f"stream_worker_aio sleep for {delay}s")
+            await asyncio.sleep(delay)
+            retries += 1
+            current_delay = min(current_delay * 2, max_delay)
         finally:
             STATE.kill_streamer()

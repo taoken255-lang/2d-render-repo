@@ -85,6 +85,7 @@ class WebRTCManager:
         self.webrtc_thread: Optional[threading.Thread] = None
         self.webrtc_loop: Optional[asyncio.AbstractEventLoop] = None
         self.running = False
+        self.main_loop: Optional[asyncio.AbstractEventLoop] = None
         
         # Очередь для межпотоковой коммуникации
         self.request_queue: asyncio.Queue[tuple[OfferRequest, Future]] = None
@@ -95,7 +96,7 @@ class WebRTCManager:
             return
             
         logger.info("🚀 Starting isolated WebRTC thread...")
-        
+
         self.running = True
         self.webrtc_thread = threading.Thread(
             target=self._webrtc_worker,
@@ -199,20 +200,36 @@ class WebRTCManager:
             
             # Создаем медиа плеер в WebRTC потоке
             player = WebRTCMediaPlayer()
+            player.main_loop = self.main_loop
             pc.addTrack(player.audio)
             pc.addTrack(player.video)
-            
+
+            def force_codec(pc: RTCPeerConnection, sender: RTCRtpSender, forced_codec: str) -> None:
+                kind = forced_codec.split("/")[0]
+                codecs = RTCRtpSender.getCapabilities(kind).codecs
+                transceiver = next(t for t in pc.getTransceivers() if t.sender == sender)
+                transceiver.setCodecPreferences(
+                    [codec for codec in codecs if codec.mimeType == forced_codec]
+                )
+
             # Настройка кодеков
             for t in pc.getTransceivers():
                 if t.kind == "video":
                     caps = RTCRtpSender.getCapabilities("video")
+
+                    preferences = list(filter(lambda x: x.name == "H264", caps.codecs))
+                    for preference in preferences:
+                        preference.parameters["profile-level-id"] = "42e028"
+                    transceiver = pc.getTransceivers()[1]
+                    transceiver.setCodecPreferences(preferences)
+
                     h264_pmode1 = [
                         c for c in caps.codecs
                         if c.name == "H264" and c.parameters.get("packetization-mode") == "1"
                     ]
                     if h264_pmode1:
                         t.setCodecPreferences(h264_pmode1)
-            
+
             await pc.setRemoteDescription(offer)
             
             # Создаем answer

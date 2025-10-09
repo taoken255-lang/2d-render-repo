@@ -8,6 +8,14 @@ This file is kept to avoid breaking existing ``uvicorn`` invocation paths such a
 
 Feel free to import ``rtc_mediaserver.webrtc_server`` directly in new code.
 """
+import os
+
+import aiortc.codecs.h264
+bitrate = int(os.getenv("BITRATE", 16_000_000))
+setattr(aiortc.codecs.h264, "DEFAULT_BITRATE", bitrate)
+setattr(aiortc.codecs.h264, "MAX_BITRATE", bitrate)
+setattr(aiortc.codecs.h264, "MIN_BITRATE", bitrate)
+
 from rtc_mediaserver.config import settings
 from rtc_mediaserver.logging_config import setup_default_logging, get_logger
 
@@ -21,12 +29,23 @@ from rtc_mediaserver.webrtc_server import app  # noqa: E402  (import after loggi
 
 if __name__ == "__main__":  # pragma: no cover
     import uvicorn
-
-    logger.info(f"Starting Simple WebRTC Server → http://localhost:{settings.port}")
-    uvicorn.run(
-        "rtc_mediaserver.webrtc_server.api:app",
-        host="0.0.0.0",
-        port=settings.port,
-        reload=True,
-        access_log=True
-    )
+    if settings.https:
+        logger.info(f"Starting secure Simple WebRTC Server → http://localhost:{settings.port}")
+        uvicorn.run(
+            "rtc_mediaserver.webrtc_server.api:app",
+            host="0.0.0.0",
+            port=settings.port,
+            reload=True,
+            access_log=True,
+            ssl_keyfile=settings.ssl_key,
+            ssl_certfile=settings.ssl_cert
+        )
+    else:
+        logger.info(f"Starting Simple WebRTC Server → http://localhost:{settings.port}")
+        uvicorn.run(
+            "rtc_mediaserver.webrtc_server.api:app",
+            host="0.0.0.0",
+            port=settings.port,
+            reload=True,
+            access_log=True
+        )

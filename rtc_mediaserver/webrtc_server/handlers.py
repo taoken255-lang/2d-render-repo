@@ -11,7 +11,7 @@ from .client_state import ClientState
 from .constants import AUDIO_SETTINGS, INTERRUPT_CALLED, AVATAR_SET, \
     INIT_DONE, COMMANDS_QUEUE, STATE, SYNTHESIZE_IN_PROGRESS, SYNTHESIZE_LOCK, SENTENCES_QUEUE
 from .info import info
-from .shared import AUDIO_SECOND_QUEUE
+from .shared import AUDIO_SECOND_QUEUE, SYNC_QUEUE
 from .tools import fit_chunk
 from .tts.elevenlabs import synthesize
 from .util import _flush_pcm_buf

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 import time
 from collections import deque
@@ -14,7 +15,7 @@ from av.frame import Frame  # type: ignore
 from av.packet import Packet  # type: ignore
 
 from rtc_mediaserver.logging_config import get_logger, setup_default_logging
-from .constants import AUDIO_SETTINGS, VIDEO_CLOCK, VIDEO_PTIME, VIDEO_TB
+from .constants import AUDIO_SETTINGS, VIDEO_CLOCK, VIDEO_PTIME, VIDEO_TB, USER_EVENTS, INTERRUPT_CALLED
 from .shared import SYNC_QUEUE, SYNC_QUEUE_SEM
 
 # Make sure logging is configured as early as possible
@@ -67,16 +68,16 @@ class PlayerStreamTrack(MediaStreamTrack):
         now = time.perf_counter()  # FIX perf_counter вместо time.time()
         delay = target - now
 
-        if self._recv_count % 50 == 0:
-            expected_time = self._start + (self._recv_count * self._period)
-            drift = now - expected_time
-            logger.info(f"🕐 {self.kind} SLOT: target={target:.6f} now={now:.6f} delay={delay*1000:.2f}ms "
-                      f"drift={drift*1000:.2f}ms pts={self._pts} recv#{self._recv_count}")
+        # if self._recv_count % 50 == 0:
+        #     expected_time = self._start + (self._recv_count * self._period)
+        #     drift = now - expected_time
+        #     logger.info(f"🕐 {self.kind} SLOT: target={target:.6f} now={now:.6f} delay={delay*1000:.2f}ms "
+        #               f"drift={drift*1000:.2f}ms pts={self._pts} recv#{self._recv_count}")
         
         if delay > 0:
             await asyncio.sleep(delay)
-            if delay > 0.05 and self._recv_count % 10 == 0:  # >50ms 
-                logger.warning(f"{self.kind} LONG SLEEP: {delay*1000:.1f}ms")
+            # if delay > 0.05 and self._recv_count % 10 == 0:  # >50ms
+            #     logger.warning(f"{self.kind} LONG SLEEP: {delay*1000:.1f}ms")
         else:
             # FIX мягкая ресинхронизация, если сильно опоздали (например, >120 мс):
             # подтягиваем базу, чтобы не копить постоянное отставание
@@ -115,27 +116,27 @@ class PlayerStreamTrack(MediaStreamTrack):
         frame.time_base = self._tb
 
         # 🔍 ДЕТАЛЬНАЯ ДИАГНОСТИКА каждые 25 вызовов
-        if self._recv_count % 25 == 0:
-            if self._recv_times:
-                avg_interval = sum(self._recv_times) / len(self._recv_times)
-                freq = 1.0 / avg_interval if avg_interval > 0 else 0
-                expected_freq = 50 if self.kind == "audio" else 25
-                min_interval = min(self._recv_times) * 1000
-                max_interval = max(self._recv_times) * 1000
-                
-                logger.info(f"{self.kind} TIMING: freq={freq:.1f}Hz (exp:{expected_freq}) "
-                          f"interval={avg_interval*1000:.1f}ms (min:{min_interval:.1f} max:{max_interval:.1f}) "
-                          f"sleep={sleep_duration*1000:.2f}ms queue={queue_size} pts={self._pts}")
-
-                if freq > expected_freq * 1.2:
-                    logger.warning(f"{self.kind} FREQ TOO HIGH: {freq:.1f}Hz > {expected_freq*1.2:.1f}Hz")
-                elif freq < expected_freq * 0.8:
-                    logger.warning(f"{self.kind} FREQ TOO LOW: {freq:.1f}Hz < {expected_freq*0.8:.1f}Hz")
-                    
-                if sleep_duration < 0.001:  # <1ms sleep
-                    logger.warning(f"{self.kind} NO SLEEP: aiortc ignoring our timing! sleep={sleep_duration*1000:.2f}ms")
-                elif sleep_duration > 0.1:  # >100ms sleep
-                    logger.warning(f"{self.kind} EXCESSIVE SLEEP: {sleep_duration*1000:.1f}ms")
+        # if self._recv_count % 25 == 0:
+        #     if self._recv_times:
+        #         avg_interval = sum(self._recv_times) / len(self._recv_times)
+        #         freq = 1.0 / avg_interval if avg_interval > 0 else 0
+        #         expected_freq = 50 if self.kind == "audio" else 25
+        #         min_interval = min(self._recv_times) * 1000
+        #         max_interval = max(self._recv_times) * 1000
+        #
+        #         logger.info(f"{self.kind} TIMING: freq={freq:.1f}Hz (exp:{expected_freq}) "
+        #                   f"interval={avg_interval*1000:.1f}ms (min:{min_interval:.1f} max:{max_interval:.1f}) "
+        #                   f"sleep={sleep_duration*1000:.2f}ms queue={queue_size} pts={self._pts}")
+        #
+        #         if freq > expected_freq * 1.2:
+        #             logger.warning(f"{self.kind} FREQ TOO HIGH: {freq:.1f}Hz > {expected_freq*1.2:.1f}Hz")
+        #         elif freq < expected_freq * 0.8:
+        #             logger.warning(f"{self.kind} FREQ TOO LOW: {freq:.1f}Hz < {expected_freq*0.8:.1f}Hz")
+        #
+        #         if sleep_duration < 0.001:  # <1ms sleep
+        #             logger.warning(f"{self.kind} NO SLEEP: aiortc ignoring our timing! sleep={sleep_duration*1000:.2f}ms")
+        #         elif sleep_duration > 0.1:  # >100ms sleep
+        #             logger.warning(f"{self.kind} EXCESSIVE SLEEP: {sleep_duration*1000:.1f}ms")
 
         return frame
 
@@ -157,7 +158,7 @@ class WebRTCMediaPlayer:
         self._thread: Optional[threading.Thread] = None
         self._quit = threading.Event()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
-
+        self.main_loop: Optional[asyncio.AbstractEventLoop] = None
         # Buffers for in-flight batch currently being streamed
         self._audio_chunks: Deque[np.ndarray] = deque()
         self._video_frames: Deque[np.ndarray] = deque()
@@ -246,7 +247,7 @@ class WebRTCMediaPlayer:
         if SYNC_QUEUE.empty():
             return False
 
-        audio_sec, frames25 = SYNC_QUEUE.get()
+        audio_sec, frames25, evt_to_send = SYNC_QUEUE.get()
 
         # FIX КРИТИЧНО: правильное разбиение на чанки!
         # Нарезаем 1 сек аудио на 50 чанков по 20мс
@@ -259,6 +260,16 @@ class WebRTCMediaPlayer:
         get_logger(__name__).info(
             f"Loaded synced batch: {len(self._audio_chunks)} audio chunks, {len(self._video_frames)} video frames"
         )
+
+        # if evt_to_send:
+        #     async def send_event(evt: str):
+        #         logging.info(f"Send event {evt_to_send}")
+        #         USER_EVENTS.put_nowait({"type": evt_to_send})
+        #         # if evt_to_send == "interrupted":
+        #         #     INTERRUPT_CALLED.clear()
+        #         await asyncio.sleep(0)
+        #     asyncio.run_coroutine_threadsafe(send_event(evt_to_send), self.main_loop)
+
         return True
 
     def _push_audio(self) -> None:
