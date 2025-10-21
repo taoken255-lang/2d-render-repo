@@ -4,21 +4,29 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import random
 import time
+import uuid
+
 from json import JSONDecodeError
 from pathlib import Path
 from typing import Any, Dict, Optional, Union
 
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse
+import wave
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, HTTPException, UploadFile, Depends, File, Form, BackgroundTasks
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from fastapi.exceptions import RequestValidationError
 from aiortc import RTCPeerConnection, RTCSessionDescription, RTCDataChannel, RTCConfiguration  # type: ignore
 from aiortc.rtcrtpsender import RTCRtpSender  # type: ignore
+from pydantic import BaseModel, UUID4
+from pydantic import ValidationError as PDValidationError
 from starlette.middleware.cors import CORSMiddleware
 from starlette.responses import Response
 
 from rtc_mediaserver.logging_config import get_logger, setup_default_logging
+from rtc_mediaserver.offline_api.grpc_utils import local_video_run
+from rtc_mediaserver.webrtc_server.task_manager import TaskManager
 from .constants import CAN_SEND_FRAMES, RTC_STREAM_CONNECTED, WS_CONTROL_CONNECTED, USER_EVENTS, AVATAR_SET, INIT_DONE, \
     STATE, State
 from .grpc_client import stream_worker_forever
@@ -34,6 +42,9 @@ setup_default_logging()
 logger = get_logger(__name__)
 
 app = FastAPI(title="Threaded WebRTC Server")
+
+task_manager = TaskManager(settings.offline_output_path / "task_status.json")
+
 
 # Exception handler for invalid JSON
 @app.exception_handler(JSONDecodeError)
@@ -296,7 +307,7 @@ async def process_offer(params: Dict[str, Any]) -> Dict[str, Any]:
             if not killer_task.cancelled() or not killer_task.done():
                 killer_task.cancel()
             try:
-                await asyncio.wait_for(RTC_STREAM_CONNECTED.acquire(), 0.1)
+                RTC_STREAM_CONNECTED.acquire()
                 logger.info(f"Peer connected {session}")
                 logger.info("CAN_SEND_FRAMES.set()")
                 CAN_SEND_FRAMES.set()
@@ -343,7 +354,12 @@ async def offer(request: Request):  # type: ignore[override]
         )
     
     if RTC_STREAM_CONNECTED.locked():
-        await STATE.current_pc.close()
+        if STATE.current_pc:
+            try:
+                logger.info(f"New connection attempt, killing old connection")
+                await STATE.current_pc.close()
+            except BaseException as e:
+                logger.error(e)
         # return JSONResponse(status_code=423, content=
         #     {
         #       "type": "error",
@@ -462,8 +478,8 @@ async def control_ws(websocket: WebSocket):  # type: ignore[override]
                   "code": "UNKNOWN_ERROR",
                   "message": "Unknown error occured."
                 })
-    except WebSocketDisconnect:
-        logger.info("Control websocket disconnected")
+    except WebSocketDisconnect as e:
+        logger.info(f"Control websocket disconnected, code: {e.code}, reason: {e.reason}")
     finally:
         eos_watcher.cancel()
         try:
@@ -471,6 +487,138 @@ async def control_ws(websocket: WebSocket):  # type: ignore[override]
         except ValueError as e:
             logger.error(f"WS_CONTROL_CONNECTED.release() -> {e!r}")
         INIT_DONE.clear()
+        if not CAN_SEND_FRAMES.is_set():
+            STATE.avatar = None
+            AVATAR_SET.clear()
+
+
+# ───────────────────────── Offline render ───────────────────────────
+class RenderRequestData(BaseModel):
+    animation_id: str
+    bps: int
+    sample_rate: int
+
+
+class RenderResponseData(BaseModel):
+    job_id: UUID4
+
+
+class CommonResponse(BaseModel):
+    detail: str
+
+
+def from_form(json: str = Form(...)) -> RenderRequestData:
+    try:
+        logger.info(f"request json: {json}")
+        return RenderRequestData.parse_raw(json)
+    except PDValidationError as exc:
+        raise HTTPException(status_code=422, detail="Invalid request body")
+
+
+async def start_render_task(
+        audio: bytes,
+        sample_rate: int,
+        bps: int,
+        avatar_id: str,
+        output_path: Path,
+        request_id: UUID4
+):
+    try:
+        await local_video_run(
+                audio=audio,
+                sample_rate=sample_rate,
+                bps=bps,
+                avatar_id=avatar_id,
+                output_path=output_path
+            )
+        await task_manager.set_status(task_id=str(request_id), status="done")
+    except Exception as exc:
+        logger.error(exc)
+        await task_manager.set_status(task_id=str(request_id), status="error")
+
+
+@app.post("/render")
+async def render(
+        request: Request,
+        response: Response,
+        background_tasks: BackgroundTasks,
+        json: RenderRequestData = Depends(from_form),
+        audio: UploadFile = File(None)
+):
+    try:
+        if audio is None:
+            response.status_code = 400
+            response_model = CommonResponse(detail="Empty audio")
+        else:
+            _, audio_ext = os.path.splitext(audio.filename)
+            request_audio = await audio.read()
+            logger.info(f"Audio size: {len(request_audio)}")
+            request_id = uuid.uuid4()
+
+            output_path = settings.offline_output_path / str(request_id)
+            await task_manager.set_status(task_id=str(request_id), status="processing")
+
+            asyncio.create_task(start_render_task(
+                audio=request_audio,
+                sample_rate=json.sample_rate,
+                bps=json.bps,
+                avatar_id=json.animation_id,
+                output_path=output_path,
+                request_id=request_id
+            ))
+
+            response.status_code = 200
+            response_model = RenderResponseData(job_id=request_id)
+    except Exception as exc:
+        logger.error(exc)
+        response.status_code = 500
+        response_model = CommonResponse(detail="Server Internal Error")
+    return response_model
+
+
+@app.get("/render/status/{job_id}")
+async def status(job_id: str):
+    task_status = task_manager.get(task_id=job_id)
+    if task_status is None:
+        return {
+            "status": "error",
+            "error": "Task not found"
+        }
+    return task_status
+
+
+@app.get("/render/result/{task_id}")
+async def get_result(task_id: str):
+    """
+    Возвращает итоговое видео по task_id.
+    """
+    task = task_manager.get(task_id)
+    if not task:
+        raise HTTPException(status_code=400, detail="Task not found")
+
+    if task.get("status") != "done":
+        raise HTTPException(status_code=400, detail=f"Task not finished: {task.get('status')}")
+
+    result_path = settings.offline_output_path / task_id / "video.mp4"
+    if not result_path or not Path(result_path).exists():
+        raise HTTPException(status_code=400, detail="Result file not found")
+
+    return FileResponse(
+        result_path,
+        media_type="video/mp4",
+        filename=f"{task_id}.mp4"
+    )
+
+@app.delete("/render/{job_id}")
+async def abort_render(job_id: str):
+    logger.info(f"Request to abort task {job_id}")
+    raise HTTPException(status_code=400)
+
+
+@app.get("/avatars")
+async def get_avatars():
+    avatars = info()
+    return {"avatars": list(avatars.keys())}
 
 
 @app.on_event("shutdown")

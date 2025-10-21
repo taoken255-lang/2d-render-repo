@@ -60,7 +60,7 @@ async def handle_audio(message: Dict[str, Any], state: ClientState) -> dict:
             "message": "Avatar is not set."
         }
     data_b64: str = message.get("data", "")
-    end_flag: bool = bool(message.get("end"))
+    end_flag: bool = bool(message.get("end", False))
 
     if not data_b64 and not end_flag:
         return {
@@ -90,6 +90,8 @@ async def handle_audio(message: Dict[str, Any], state: ClientState) -> dict:
         state.pcm_buf.clear()
         AUDIO_SECOND_QUEUE.put_nowait((arr, state.sample_rate))
         logger.info("Queued tail audio chunk (%d samples)", arr.shape[0])
+    if end_flag:
+        AUDIO_SECOND_QUEUE.put_nowait((None, None))
 
 async def handle_synthesize_speech(message: Dict[str, Any], state: ClientState) -> dict:
     """Handle incoming raw audio chunk encoded in base64."""

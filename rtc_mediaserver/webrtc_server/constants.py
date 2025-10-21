@@ -5,6 +5,7 @@ import asyncio
 import fractions
 import logging
 import os
+import threading
 from pathlib import Path
 
 __all__ = [
@@ -98,20 +99,24 @@ SENTENCES_QUEUE = asyncio.Queue()
 class State:
     def __init__(self):
         self.streamer_task: asyncio.Task = None
+        self.streamer_loop = asyncio.AbstractEventLoop = None
         self.avatar: str = None
         self.current_session_id = None
         self.auto_idle: bool = True
         self.current_pc: RTCPeerConnection = None
         self.chunks_to_skip: int = 0
+        self.tts_start: float = 0
+        self.first_chunk_received: bool = False
 
     def kill_streamer(self):
         if self.streamer_task:
             if not self.streamer_task.cancelled() and not self.streamer_task.done():
                 try:
                     logging.info("streamer_task cancelling")
-                    self.streamer_task.cancel()
+                    self.streamer_loop.call_soon_threadsafe(self.streamer_task.cancel)
                     logging.info("streamer_task cancelled")
                     self.streamer_task = None
+                    self.streamer_loop = None
                 except:
                     logging.error("Error cancel streamer_task")
 
@@ -134,5 +139,7 @@ class State:
                 AUDIO_SECOND_QUEUE.task_done()
             except Exception:  # noqa: BLE001
                 break
+
+        STATE.first_chunk_received = False
 
 STATE = State()

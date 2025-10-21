@@ -13,7 +13,7 @@ from aiortc import RTCPeerConnection, RTCSessionDescription
 from aiortc.rtcrtpsender import RTCRtpSender
 
 from .player import WebRTCMediaPlayer
-from .constants import RTC_STREAM_CONNECTED, CAN_SEND_FRAMES, AVATAR_SET, STATE, State
+from .constants import RTC_STREAM_CONNECTED, CAN_SEND_FRAMES, AVATAR_SET, STATE, State, WS_CONTROL_CONNECTED
 from ..config import settings
 
 logger = logging.getLogger(__name__)
@@ -276,14 +276,16 @@ class WebRTCManager:
                 if not killer_task.cancelled() and not killer_task.done():
                     killer_task.cancel()
                 try:
-                    await asyncio.wait_for(RTC_STREAM_CONNECTED.acquire(), 0.1)
+                    await asyncio.wait_for(RTC_STREAM_CONNECTED.acquire(), 60)
                     logger.info(f"🎵 WebRTC peer connected {session_id}")
                     logger.info("🎵 CAN_SEND_FRAMES.set()")
                     CAN_SEND_FRAMES.set()
                     State.current_session_id = session_id
+                    STATE.current_pc = pc
                 except asyncio.TimeoutError:
                     logger.info(f"🔒 WebRTC peer tried to connect to locked resource {session_id}")
                     await pc.close()
+
 
             elif pc.connectionState in ("failed", "disconnected", "closed"):
                 if not killer_task.cancelled() and not killer_task.done():
@@ -292,7 +294,8 @@ class WebRTCManager:
                 if session_id == State.current_session_id:
                     logger.info("🎵 CAN_SEND_FRAMES.clear()")
                     CAN_SEND_FRAMES.clear()
-                    AVATAR_SET.clear()
+                    if not WS_CONTROL_CONNECTED.locked():
+                        AVATAR_SET.clear()
                     STATE.auto_idle = True
                     try:
                         RTC_STREAM_CONNECTED.release()

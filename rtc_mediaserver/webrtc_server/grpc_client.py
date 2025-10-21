@@ -6,6 +6,7 @@ import glob
 import logging
 import random
 import re
+import threading
 import time
 import wave
 from pathlib import Path
@@ -53,110 +54,95 @@ async def stream_worker_aio() -> None:
     # Keep state between iterations
     from collections import deque
     pending_audio: Deque[Tuple[np.ndarray, int, ServiceEvents | None, bool, bool]] = deque()
-    frames_batch: List[np.ndarray] = []
+    frames_batch: List[Tuple[np.ndarray, int]] = []
 
     CHUNK_SAMPLES = AUDIO_SETTINGS.samples_per_chunk
     chunks_sem = asyncio.Semaphore(settings.max_inflight_chunks)
 
     async def sender_generator():
         """Coroutine that yields RenderRequest messages."""
-        # Send avatar image first
-        # avatar_path = Path(DEFAULT_IMAGE_PATH)
-        # if not avatar_path.exists():
-        #     raise RuntimeError(f"Avatar image '{DEFAULT_IMAGE_PATH}' not found")
-        # img_bytes = avatar_path.read_bytes()
-        # w, h = Image.open(avatar_path).size
-        #
-        # yield render_service_pb2.RenderRequest(
-        #     image=render_service_pb2.ImageChunk(data=img_bytes, width=w, height=h),
-        #     online=True,
-        #     output_format = "RGB"
-        # )
-        avatar = STATE.avatar
-        logger.info(f"Set avatar {avatar}")
-        yield render_service_pb2.RenderRequest(set_avatar=render_service_pb2.SetAvatar(avatar_id=avatar),
-                                               online=True,
-                                               output_format="RGB"
-                                               )
-        #logger.debug("Initial avatar sent to render service (%dx%d)", w, h)
+        try:
+            avatar = STATE.avatar
+            logger.info(f"Set avatar {avatar}")
+            yield render_service_pb2.RenderRequest(set_avatar=render_service_pb2.SetAvatar(avatar_id=avatar),
+                                                   online=True,
+                                                   output_format="RGB"
+                                                   )
 
-        # Stream audio seconds as they appear in queue with back-pressure from video
-        MAX_INFLIGHT = settings.max_inflight_chunks          # секунды аудио, которые можем отправить «вперёд»
-        seconds_inflight = 0      # сколько секунд уже отправили, но ещё не «закрыли» кадрами
+            speech_sended = False
 
-        speech_sended = False
+            while True:
+                interrupted = False
 
-        while CAN_SEND_FRAMES.is_set():
-            # если отправили слишком много тишины – ждём, пока придут кадры
-            # while seconds_inflight >= MAX_INFLIGHT:
-            #     await can_send_next.wait()
-            #     can_send_next.clear()
-            #     seconds_inflight -= 1  # один долг погашен
+                if INTERRUPT_CALLED.is_set():
+                    interrupted = True
+                    STATE.chunks_to_skip = len(pending_audio)
+                    INTERRUPT_CALLED.clear()
+                    USER_EVENTS.put_nowait({"type": "interrupted"})
 
-            interrupted = False
-
-            if INTERRUPT_CALLED.is_set():
-                interrupted = True
-                STATE.chunks_to_skip = len(pending_audio)
-                INTERRUPT_CALLED.clear()
-                USER_EVENTS.put_nowait({"type": "interrupted"})
-
-
-
-            event = None
-            is_speech = True
-            is_interrupt = False
-            if AUDIO_SECOND_QUEUE.qsize() > 0:
-                logger.info(f"AUDIO_SECOND_QUEUE.qsize={AUDIO_SECOND_QUEUE.qsize()}")
-                audio_sec, sr = AUDIO_SECOND_QUEUE.get_nowait()
-
-                # Подгоняем размер до CHUNK_SAMPLES
-                n = audio_sec.shape[0]
-                if n < CHUNK_SAMPLES:
-                    pad = np.zeros(CHUNK_SAMPLES - n, dtype=np.int16)
-                    audio_sec = np.concatenate([audio_sec, pad])
-                elif n > CHUNK_SAMPLES:
-                    audio_sec = audio_sec[:CHUNK_SAMPLES]
-
-                speech_sended = True
+                event = None
                 is_speech = True
-            else:
-                if speech_sended:
-                    speech_sended = False
-                    event = ServiceEvents.EOS if not interrupted else ServiceEvents.INTERRUPT
-                # WAV не грузится → отправляем тишину
-                audio_sec, sr = np.zeros(CHUNK_SAMPLES, dtype=np.int16), AUDIO_SETTINGS.sample_rate
-                logger.info("AUDIO_SECOND_QUEUE empty. Steady silence – idle state")
-                is_speech = False
+                is_interrupt = False
+                if AUDIO_SECOND_QUEUE.qsize() > 0:
+                    logger.info(f"AUDIO_SECOND_QUEUE.qsize={AUDIO_SECOND_QUEUE.qsize()}")
+                    audio_sec, sr = AUDIO_SECOND_QUEUE.get_nowait()
 
+                    if audio_sec is None and sr is None:
+                        logger.info(f"Got EOS marker - gen silence")
+                        if speech_sended:
+                            speech_sended = False
+                            event = ServiceEvents.EOS if not interrupted else ServiceEvents.INTERRUPT
+                        audio_sec, sr = np.zeros(CHUNK_SAMPLES, dtype=np.int16), AUDIO_SETTINGS.sample_rate
+                        logger.info("AUDIO_SECOND_QUEUE empty. Steady silence – idle state")
+                        is_speech = False
+                    else:
+                        n = audio_sec.shape[0]
+                        if n < CHUNK_SAMPLES:
+                            pad = np.zeros(CHUNK_SAMPLES - n, dtype=np.int16)
+                            audio_sec = np.concatenate([audio_sec, pad])
+                        elif n > CHUNK_SAMPLES:
+                            audio_sec = audio_sec[:CHUNK_SAMPLES]
 
-            pending_audio.append((audio_sec, sr, event, is_speech, is_interrupt))
+                        speech_sended = True
+                        is_speech = True
+                        logger.info(f"TMR Chunk got after {time.time() - STATE.tts_start}")
+                else:
+                    if speech_sended:
+                        speech_sended = False
+                        event = ServiceEvents.EOS if not interrupted else ServiceEvents.INTERRUPT
+                    audio_sec, sr = np.zeros(CHUNK_SAMPLES, dtype=np.int16), AUDIO_SETTINGS.sample_rate
+                    logger.info("AUDIO_SECOND_QUEUE empty. Steady silence – idle state")
+                    is_speech = False
 
-            request = render_service_pb2.RenderRequest(
-                audio=render_service_pb2.AudioChunk(data=audio_sec.tobytes(), sample_rate=sr, bps=16, is_voice=is_speech),
-                online=True
-            )
+                pending_audio.append((audio_sec, sr, event, is_speech, is_interrupt))
 
-            yield request
+                request = render_service_pb2.RenderRequest(
+                    audio=render_service_pb2.AudioChunk(data=audio_sec.tobytes(), sample_rate=sr, bps=16, is_voice=is_speech),
+                    online=True
+                )
 
-            while COMMANDS_QUEUE.qsize() > 0 and not SYNTHESIZE_IN_PROGRESS.is_set():
-                evt, evt_payload = COMMANDS_QUEUE.get_nowait()
-                if evt == ServiceEvents.SET_ANIMATION:
-                    logger.info(f"Request -> Playing animation {evt_payload}")
-                    yield render_service_pb2.RenderRequest(play_animation=render_service_pb2.PlayAnimation(animation=evt_payload, auto_idle=STATE.auto_idle))
-                elif evt == ServiceEvents.SET_EMOTION:
-                    logger.info(f"Request -> set emotion {evt_payload}")
-                    yield render_service_pb2.RenderRequest(
-                        set_emotion=render_service_pb2.SetEmotion(emotion=evt_payload))
+                yield request
 
-            await chunks_sem.acquire()
+                while COMMANDS_QUEUE.qsize() > 0 and not SYNTHESIZE_IN_PROGRESS.is_set():
+                    evt, evt_payload = COMMANDS_QUEUE.get_nowait()
+                    if evt == ServiceEvents.SET_ANIMATION:
+                        logger.info(f"Request -> Playing animation {evt_payload}")
+                        yield render_service_pb2.RenderRequest(play_animation=render_service_pb2.PlayAnimation(animation=evt_payload, auto_idle=STATE.auto_idle))
+                    elif evt == ServiceEvents.SET_EMOTION:
+                        logger.info(f"Request -> set emotion {evt_payload}")
+                        yield render_service_pb2.RenderRequest(
+                            set_emotion=render_service_pb2.SetEmotion(emotion=evt_payload))
 
-            #seconds_inflight += 1  # logically chunks in flight
-            logger.info("Sent audio chunk to render service (inflight=%d, pending=%d)",
-                        seconds_inflight, len(pending_audio))
-            await asyncio.sleep(0)
+                await chunks_sem.acquire()
 
-        logger.info("Sender exited")
+                logger.info("Sent audio chunk to render service (pending=%d)",len(pending_audio))
+                await asyncio.sleep(0)
+
+            logger.info("Sender exited")
+        except BaseException as e:
+            logger.error(f"Sender error {e!r}")
+            import traceback
+            logger.error(traceback.format_tb(e.__traceback__))
 
     frames = 0
 
@@ -165,38 +151,41 @@ async def stream_worker_aio() -> None:
     try:
         t_start = time.time()
         async for chunk in stub.RenderStream(sender_generator()):
-            if not CAN_SEND_FRAMES.is_set():
-                logger.info("No clients - exiting receiver")
-                break
+            # if not CAN_SEND_FRAMES.is_set():
+            #     logger.info("No clients - exiting receiver")
+            #     break
             if chunk.WhichOneof("chunk") == "video":
-                #logger.info(f"New frame received, {len(frames_batch)}/{FRAMES_PER_CHUNK}")
+                STATE.first_chunk_received = True
+                frame_idx = 0
+                try:
+                    frame_idx = chunk.video.frame_idx
+                    logger.info(f"FRAME_RECEIVE:GRPC {frame_idx}")
+                except:
+                    pass
                 frames += 1
                 img = Image.frombytes("RGB", (chunk.video.width, chunk.video.height), chunk.video.data, "raw")
-                #img.save(f"images/frame_{frames}.png")
                 img_np = np.asarray(
                     img,
                     np.uint8,
                 )
-                frames_batch.append(img_np)
+                frames_batch.append((img_np, frame_idx))
 
-                # Когда набрали минимальный пакет кадров
                 if len(frames_batch) == FRAMES_PER_CHUNK:
                     logger.info(f"Got 15 frames for {time.time() - t_start}")
                     chunks_sem.release()
                     if pending_audio:
                         audio_chunk, _sr, event, is_speech, is_interrupt = pending_audio.popleft()
 
+                        if is_speech:
+                            logger.info(f"TMR Chunk rendered after {time.time() - STATE.tts_start}")
+
                         event_to_send = None
                         if event and event == ServiceEvents.EOS:
                             event_to_send = "eos"
-                            USER_EVENTS.put_nowait({"type": event_to_send})
-                            # asyncio.create_task(send_event("eos"))
-                            # await asyncio.sleep(0)
+                            #USER_EVENTS.put_nowait({"type": event_to_send})
+
                         if is_interrupt:
                             event_to_send = "interrupted"
-                            # asyncio.create_task(send_event("interrupted"))
-                            # INTERRUPT_CALLED.clear()
-                            # await asyncio.sleep(0)
 
                         if STATE.chunks_to_skip == 0:
                             SYNC_QUEUE.put((audio_chunk, frames_batch.copy(), event_to_send))
@@ -210,13 +199,13 @@ async def stream_worker_aio() -> None:
                         logger.warning("Render service produced %d frames but no matching audio is pending", FRAMES_PER_CHUNK)
                     frames_batch.clear()
 
-                    t_sleep = (0.6 - (time.time() - t_start)) + 0.040
-
-                    logger.info(f"grpc sleep = {t_sleep}")
-
-                    if t_sleep > 0:
-                        logger.info(f"Sleep for {t_sleep}")
-                        await asyncio.sleep(t_sleep)
+                    # t_sleep = (0.50 - (time.time() - t_start))
+                    #
+                    # logger.info(f"grpc sleep = {t_sleep}")
+                    #
+                    # if t_sleep > 0:
+                    #     logger.info(f"Sleep for {t_sleep}")
+                    #     await asyncio.sleep(t_sleep)
                     t_start = time.time()
 
                     await asyncio.sleep(0)
@@ -250,7 +239,7 @@ async def stream_worker_aio() -> None:
                 if not pending_audio:
                     logger.warning("No pending audio for remaining frames – stopping flush")
                     break
-                audio_sec, _sr, _ = pending_audio.popleft()
+                audio_sec, _, _, _, _ = pending_audio.popleft()
                 SYNC_QUEUE.put_nowait((audio_sec, batch))
                 logger.info("Final SYNC_QUEUE +1 (flush) (size=%d)", SYNC_QUEUE.qsize())
 
@@ -379,18 +368,11 @@ async def stream_worker_from_disk(
         end = start + samples_per_sec
         audio_sec = audio[start:end]  # np.int16, 16000 samples
 
-        if not AUDIO_SECOND_QUEUE.qsize():
-            logger.info("No chunks - send silence")
-            audio_sec = np.zeros(16000, dtype=np.int16)
-        else:
-            logger.info("Got chunk")
-            audio_sec = AUDIO_SECOND_QUEUE.get_nowait()
-            audio_sec = audio_sec[0]
-
         frames_batch = frames_batches[sec_idx]  # list[np.ndarray], длина = fps
-        SYNC_QUEUE.put((audio_sec, frames_batch))
+        SYNC_QUEUE.put((audio_sec, frames_batch, "eos"))
         logger.info("SYNC_QUEUE +1 (sec=%d/%d, size=%d)",
                     sec_idx + 1, seconds_frames, SYNC_QUEUE.qsize())
+        await asyncio.sleep(0.95)
 
     logger.info("Загрузка с диска завершена: %d секунд/батчей отправлено.", seconds_frames)
 
@@ -407,8 +389,27 @@ async def stream_worker_forever() -> None:
     while True:
         try:
             await Conditions.can_process_frames()
-            STATE.streamer_task = asyncio.create_task(stream_worker_aio())
-            await STATE.streamer_task
+
+            def run_worker_in_thread():
+                t_loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(t_loop)
+                STATE.streamer_loop = t_loop
+                async def run_worker():
+                    t = asyncio.create_task(stream_worker_aio())
+                    #t = asyncio.create_task(stream_worker_from_disk("11sec_16k_1ch.wav"))
+                    STATE.streamer_task = t
+
+                    await t
+                try:
+                    t_loop.run_until_complete(run_worker())
+                finally:
+                    t_loop.close()
+
+            thread = threading.Thread(target=run_worker_in_thread)
+            thread.start()
+
+            await asyncio.get_event_loop().run_in_executor(None, thread.join)
+
             logger.warning("stream_worker_aio exited normally")
             retries = 0
             current_delay = initial_delay

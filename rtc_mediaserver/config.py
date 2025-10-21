@@ -1,6 +1,7 @@
 """Configuration settings for RTC Media Server."""
 
 import os
+from pathlib import Path
 from typing import Optional
 
 from pydantic_settings import BaseSettings
@@ -52,8 +53,11 @@ class Settings(BaseSettings):
     elevenlabs_optimize: int = 1
     elevenlabs_voice_speed: float = 1.1
     elevenlabs_type: str = "http"
+    elevenlabs_stability: float = 0.87
 
     bitrate: int = 16_000_000
+
+    offline_output_path: Path = Path("offline_data")
 
 # Global settings instance
 settings = Settings() 

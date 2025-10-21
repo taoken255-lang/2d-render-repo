@@ -38,7 +38,8 @@ if __name__ == "__main__":  # pragma: no cover
             reload=True,
             access_log=True,
             ssl_keyfile=settings.ssl_key,
-            ssl_certfile=settings.ssl_cert
+            ssl_certfile=settings.ssl_cert,
+            loop="asyncio"
         )
     else:
         logger.info(f"Starting Simple WebRTC Server → http://localhost:{settings.port}")
@@ -47,5 +48,6 @@ if __name__ == "__main__":  # pragma: no cover
             host="0.0.0.0",
             port=settings.port,
             reload=True,
-            access_log=True
+            access_log=True,
+            loop="asyncio"
         )
