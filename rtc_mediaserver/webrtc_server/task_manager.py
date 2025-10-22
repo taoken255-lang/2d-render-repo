@@ -1,5 +1,6 @@
 import json
 import asyncio
+import logging
 from pathlib import Path
 from typing import Dict, Any
 
@@ -9,6 +10,8 @@ class TaskManager:
         self.status_file = status_file
         self.lock = asyncio.Lock()
         self.tasks: Dict[str, Any] = {}
+        self.current_task: asyncio.Task = None
+        self.current_job_id: str = None
 
         # при старте загружаем статусы
         if self.status_file.exists():
@@ -16,6 +19,28 @@ class TaskManager:
                 self.tasks = json.loads(self.status_file.read_text())
             except Exception:
                 self.tasks = {}
+
+    def set_task(self, task: asyncio.Task, job_id: str):
+        self.current_task = task
+        self.current_job_id = job_id
+
+        def cb(t: asyncio.Task):
+            logging.info(f"Redner task id={self.current_job_id} {t} completed")
+            self.current_task = None
+            self.current_job_id = None
+
+        self.current_task.add_done_callback(cb)
+
+    def cancel_task(self, job_id: str):
+        if self.current_task and self.current_job_id == job_id:
+            logging.info(f"Redner task id={self.current_job_id} canceled")
+            self.current_task.cancel()
+            self.current_task = None
+            self.current_job_id = None
+
+    def is_locked(self):
+        return self.current_task is not None
+
 
     async def save(self):
         """Асинхронно сохраняет все статусы в файл"""

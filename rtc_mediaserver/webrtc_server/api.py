@@ -34,6 +34,7 @@ from .player import WebRTCMediaPlayer
 from .handlers import HANDLERS, ClientState
 from .info import info
 from .tts.elevenlabs import synthesize_worker, voices
+from .util import get_sample_rate_from_wav_bytes
 from .webrtc_manager import webrtc_manager
 from ..config import settings
 
@@ -494,9 +495,7 @@ async def control_ws(websocket: WebSocket):  # type: ignore[override]
 
 # ───────────────────────── Offline render ───────────────────────────
 class RenderRequestData(BaseModel):
-    animation_id: str
-    bps: int
-    sample_rate: int
+    avatar: str
 
 
 class RenderResponseData(BaseModel):
@@ -507,10 +506,10 @@ class CommonResponse(BaseModel):
     detail: str
 
 
-def from_form(json: str = Form(...)) -> RenderRequestData:
+def from_form(avatar: str = Form(...)) -> RenderRequestData:
     try:
         logger.info(f"request json: {json}")
-        return RenderRequestData.parse_raw(json)
+        return RenderRequestData(avatar=avatar)
     except PDValidationError as exc:
         raise HTTPException(status_code=422, detail="Invalid request body")
 
@@ -542,9 +541,14 @@ async def render(
         request: Request,
         response: Response,
         background_tasks: BackgroundTasks,
-        json: RenderRequestData = Depends(from_form),
+        data: RenderRequestData = Depends(from_form),
         audio: UploadFile = File(None)
 ):
+    if task_manager.is_locked():
+        return {
+          "error": "UNKNOWN_ERROR",
+          "description": "Unknown error occured."
+        }
     try:
         if audio is None:
             response.status_code = 400
@@ -552,20 +556,25 @@ async def render(
         else:
             _, audio_ext = os.path.splitext(audio.filename)
             request_audio = await audio.read()
+            sample_rate = get_sample_rate_from_wav_bytes(request_audio)
             logger.info(f"Audio size: {len(request_audio)}")
             request_id = uuid.uuid4()
+
+            if not settings.offline_output_path.exists():
+                settings.offline_output_path.mkdir(exist_ok=True, parents=True)
 
             output_path = settings.offline_output_path / str(request_id)
             await task_manager.set_status(task_id=str(request_id), status="processing")
 
-            asyncio.create_task(start_render_task(
+            t = asyncio.create_task(start_render_task(
                 audio=request_audio,
-                sample_rate=json.sample_rate,
-                bps=json.bps,
-                avatar_id=json.animation_id,
+                sample_rate=sample_rate,
+                bps=16,
+                avatar_id=data.avatar,
                 output_path=output_path,
                 request_id=request_id
             ))
+            task_manager.set_task(t, job_id=str(request_id))
 
             response.status_code = 200
             response_model = RenderResponseData(job_id=request_id)
@@ -612,7 +621,7 @@ async def get_result(task_id: str):
 @app.delete("/render/{job_id}")
 async def abort_render(job_id: str):
     logger.info(f"Request to abort task {job_id}")
-    raise HTTPException(status_code=400)
+    task_manager.cancel_task(job_id)
 
 
 @app.get("/avatars")
