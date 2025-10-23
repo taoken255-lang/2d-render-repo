@@ -1,0 +1,183 @@
+stages:
+  - build
+  - deploy
+
+image: docker/compose:1.29.2
+
+variables:
+  IMAGE: ${CI_REGISTRY_IMAGE}:${CI_PIPELINE_ID}
+  APP_PROD_IMAGE: ${CI_REGISTRY_IMAGE}/prod:${CI_PIPELINE_ID}
+  GIT_SUBMODULE_STRATEGY: recursive
+
+.tags: &tags
+  before_script:
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+  after_script:
+    - docker logout $CI_REGISTRY
+
+build:
+  <<: *tags
+  stage: build
+  tags:
+    - dhs-endpoints-01
+  script:
+    - docker build -t ${APP_PROD_IMAGE} .
+    - docker push ${APP_PROD_IMAGE}
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "feature/test_fix_tts_new"'
+
+deploy master:
+  <<: *tags
+  stage: deploy
+  tags:
+    - dhs-endpoints-01
+  script:
+    - docker rm -f ${CI_PROJECT_NAME}-prod || true
+    - docker run -p 7071:8080 -d --name ${CI_PROJECT_NAME}-prod --restart=always --network host ${APP_PROD_IMAGE}
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "master"'
+      when: manual
+
+deploy-agent-stage master:
+  <<: *tags
+  stage: deploy
+  tags:
+    - crp-instance-10
+  script:
+    - docker rm -f ${CI_PROJECT_NAME}-prod || true
+    - docker run -p 7010:7010 -d --name ${CI_PROJECT_NAME}-prod --restart=always --env-file ${ENV_RTC} --network host ${APP_PROD_IMAGE}
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "feature/quality"'
+      when: manual
+
+deploy-agent-stage master_2:
+  <<: *tags
+  stage: deploy
+  tags:
+    - crp-instance-10
+  script:
+    - docker rm -f ${CI_PROJECT_NAME}-prod-2 || true
+    - docker run -p 7013:7010 -d --name ${CI_PROJECT_NAME}-prod-2 --restart=always --env-file ${ENV_RTC_2} --network host ${APP_PROD_IMAGE}
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "feature/quality"'
+      when: manual
+
+deploy-agent-stage test:
+    <<: *tags
+    stage: deploy
+    tags:
+      - crp-instance-10
+    script:
+      - docker rm -f ${CI_PROJECT_NAME}-test-01 || true
+      - docker run -p 7011:7011 -d --name ${CI_PROJECT_NAME}-test-01 --restart=always --env-file ${ENV_RTC_TEST} --network host ${APP_PROD_IMAGE}
+    rules:
+      - if: '$CI_COMMIT_BRANCH == "feature/quality"'
+        when: manual
+
+deploy-agent-stage animation:
+    <<: *tags
+    stage: deploy
+    tags:
+      - crp-instance-10
+    script:
+      - docker rm -f ${CI_PROJECT_NAME}-anim || true
+      - docker run -p 7012:7012 -d --name ${CI_PROJECT_NAME}-anim --restart=always --env-file ${ENV_RTC_ANIM} --network host ${APP_PROD_IMAGE}
+    rules:
+      - if: '$CI_COMMIT_BRANCH == "feature/sythesize_speech"'
+        when: manual
+
+deploy-5080 master:
+  <<: *tags
+  stage: deploy
+  tags:
+    - orug-5080
+  script:
+    - docker rm -f ${CI_PROJECT_NAME}-prod || true
+    - docker run -p 7071:8080 -d --name ${CI_PROJECT_NAME}-prod --restart=always --network host ${APP_PROD_IMAGE}
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "feature/quality"'
+      when: manual
+
+deploy-ai-gpu1:
+    <<: *tags
+    stage: deploy
+    tags:
+      - ai-gpu1
+    script:
+      - docker rm -f ${CI_PROJECT_NAME}-ai-gpu1 || true
+      - docker run -p 7011:7011 -d --name ${CI_PROJECT_NAME}-ai-gpu1 --restart=always --env-file ${ENV_AI_GPU1} --network host ${APP_PROD_IMAGE}
+    rules:
+      - if: '$CI_COMMIT_BRANCH == "feature/test_fix_tts_new"'
+        when: manual
+
+deploy-crp-09:
+    <<: *tags
+    stage: deploy
+    tags:
+      - crp-instance-09
+    script:
+      - docker rm -f ${CI_PROJECT_NAME}-crp09 || true
+      - docker run -d --name ${CI_PROJECT_NAME}-crp09 --restart=always --cap-add=SYS_PTRACE --env-file ${ENV_RTC_CRP9} --network host ${APP_PROD_IMAGE}
+    rules:
+      - if: '$CI_COMMIT_BRANCH == "feature/quality"'
+        when: manual
+
+vsp5080-01-deploy:
+    <<: *tags
+    stage: deploy
+    tags:
+      - avatar-5080-01
+    script:
+      - docker rm -f webrtc || true
+      - docker run -p 7011:7011 -d --restart=always --name webrtc --env-file ${ENV_5080_AVATAR} --network host ${APP_PROD_IMAGE}
+    rules:
+      - if: '$CI_COMMIT_BRANCH == "feature/test_fix_tts_new"'
+        when: manual
+
+aij-02-deploy:
+    <<: *tags
+    stage: deploy
+    tags:
+      - aij-5080-02
+    script:
+      - docker rm -f webrtc || true
+      - docker run -p 7011:7011 -d --restart=always --name webrtc --env-file ${ENV_5080_AVATAR} --network host ${APP_PROD_IMAGE}
+    rules:
+      - if: '$CI_COMMIT_BRANCH == "feature/quality"'
+        when: manual
+
+aij-01-deploy:
+    <<: *tags
+    stage: deploy
+    tags:
+      - aij-5080-01
+    script:
+      - docker rm -f webrtc || true
+      - docker run -p 7011:7011 -d --restart=always --name webrtc --env-file ${ENV_5080_AVATAR} --network host ${APP_PROD_IMAGE}
+    rules:
+      - if: '$CI_COMMIT_BRANCH == "feature/quality"'
+        when: manual
+
+sber_health-deploy:
+    <<: *tags
+    stage: deploy
+    tags:
+      - sz-5080-01
+    script:
+      - docker rm -f webrtc || true
+      - docker run -p 7011:7011 -d --restart=always --name webrtc --env-file ${ENV_5080_AVATAR} --network host ${APP_PROD_IMAGE}
+    rules:
+      - if: '$CI_COMMIT_BRANCH == "feature/test_fix_tts_new"'
+        when: manual
+
+sber_health-dev-deploy:
+    <<: *tags
+    stage: deploy
+    tags:
+      - clouren-stand-06-shell
+    script:
+      - docker rm -f webrtc || true
+      - docker run -p 7011:7011 -d --restart=always --name webrtc --env-file ${ENV_5080_DEV_AVATAR} --network host ${APP_PROD_IMAGE}
+    rules:
+      - if: '$CI_COMMIT_BRANCH == "feature/test_fix_tts_new"'
+        when: manual
